@@ -53,16 +53,12 @@ Max heat flux: 41.40 MW/m²
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────┐
-│  Engines/          Concrete engine generators │  ← you work here
-├──────────────────────────────────────────────┤
-│  Physics/          First-principles math      │  ← pure calculations
-│  Geometry/         PicoGK wrappers            │  ← voxels, SDF, VDB
-├──────────────────────────────────────────────┤
-│  PicoGK            Voxel geometry kernel      │  ← foundation (LEAP 71)
-└──────────────────────────────────────────────┘
-```
+| Layer | Directory | Role |
+|-------|-----------|------|
+| **Application** | `Engines/` | Concrete engine generators — you work here |
+| **Physics** | `Physics/` | First-principles math — pure calculations |
+| **Geometry** | `Geometry/` | PicoGK wrappers — voxels, SDF, VDB staging |
+| **Foundation** | PicoGK (NuGet) | Voxel geometry kernel by [LEAP 71](https://github.com/leap71/PicoGK) |
 
 ### Physics/
 

@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>OpenSpaceArch Engine Viewer</title>
+<style>
+  body { margin: 0; background: #1a1a2e; overflow: hidden; font-family: monospace; }
+  #controls {
+    position: fixed; top: 10px; left: 10px; z-index: 100;
+    background: rgba(0,0,0,0.8); padding: 12px; border-radius: 8px;
+    color: #ddd; font-size: 12px; min-width: 220px;
+  }
+  #controls label { display: block; margin: 6px 0 2px; color: #aaa; }
+  #controls input[type=range] { width: 100%; }
+  #controls select, #controls button {
+    width: 100%; padding: 4px; margin: 2px 0;
+    background: #333; color: #ddd; border: 1px solid #555; border-radius: 4px;
+  }
+  #controls button:hover { background: #555; }
+  #drop-zone {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #666; font-size: 18px; text-align: center; pointer-events: none;
+  }
+  #info { position: fixed; bottom: 10px; left: 10px; color: #555; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <b style="color:#e94560">OpenSpaceArch Viewer</b>
+  <br><br>
+  <button onclick="document.getElementById('file-input').click()">Load STL</button>
+  <input type="file" id="file-input" accept=".stl" style="display:none">
+
+  <label>Opacity: <span id="opacity-val">0.6</span></label>
+  <input type="range" id="opacity" min="0.05" max="1" step="0.05" value="0.6">
+
+  <label>Clip X: <span id="clipx-val">off</span></label>
+  <input type="range" id="clipx" min="-100" max="100" step="1" value="100">
+
+  <label>Clip Y: <span id="clipy-val">off</span></label>
+  <input type="range" id="clipy" min="-100" max="100" step="1" value="100">
+
+  <label>Clip Z: <span id="clipz-val">off</span></label>
+  <input type="range" id="clipz" min="-50" max="300" step="1" value="300">
+
+  <label>Render</label>
+  <select id="render-mode">
+    <option value="solid">Solid</option>
+    <option value="xray" selected>X-Ray</option>
+    <option value="wireframe">Wireframe</option>
+  </select>
+
+  <label>Color</label>
+  <select id="color-mode">
+    <option value="copper" selected>CuCrZr Copper</option>
+    <option value="steel">Steel</option>
+    <option value="white">White</option>
+    <option value="heatmap">Heatmap (by Z)</option>
+  </select>
+
+  <br>
+  <button onclick="resetView()">Reset View</button>
+  <button onclick="toggleClip()">Toggle Clip</button>
+</div>
+
+<div id="drop-zone">Drop STL file here<br>or click "Load STL"</div>
+<div id="info">OpenSpaceArch v5 | Three.js r160</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 2000);
+camera.position.set(80, 80, 200);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.localClippingEnabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+
+// Environment map for PBR metallic reflections
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+const envTexture = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environment = envTexture;
+
+// Lights (supplement env map)
+const ambient = new THREE.AmbientLight(0xffffff, 0.3);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+dirLight.position.set(100, 200, 150);
+scene.add(dirLight);
+const dirLight2 = new THREE.DirectionalLight(0xffeedd, 0.4);
+dirLight2.position.set(-80, -40, -100);
+scene.add(dirLight2);
+
+// Grid
+const grid = new THREE.GridHelper(200, 20, 0x333355, 0x222244);
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
+
+// Clipping planes
+const clipPlanes = [
+  new THREE.Plane(new THREE.Vector3(-1, 0, 0), 100),
+  new THREE.Plane(new THREE.Vector3(0, -1, 0), 100),
+  new THREE.Plane(new THREE.Vector3(0, 0, -1), 300),
+];
+let clipEnabled = true;
+
+// Materials
+const colors = {
+  copper: 0xd98a5c,  // warm CuCrZr copper, PicoGK-style
+  steel: 0x9999aa,
+  white: 0xe0e0e0,
+  heatmap: 0xff4444,
+};
+
+let mesh = null;
+let geometry = null;
+
+function createMaterial(opacity, colorName, mode) {
+  const clip = clipEnabled ? clipPlanes : [];
+
+  if (mode === 'wireframe') {
+    return new THREE.MeshBasicMaterial({
+      color: colors[colorName] || colors.copper,
+      wireframe: true,
+      side: THREE.FrontSide,
+      clippingPlanes: clip,
+    });
+  }
+
+  const params = {
+    color: colors[colorName] || colors.copper,
+    metalness: 0.85,
+    roughness: 0.25,
+    side: THREE.FrontSide,
+    clippingPlanes: clip,
+    clipShadows: true,
+  };
+
+  if (mode === 'xray') {
+    // Custom shader: Fresnel-based transparency
+    // Thin walls (edges, grazing angles) → more transparent
+    // Thick walls (facing camera) → more opaque
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(colors[colorName] || colors.copper) },
+        uOpacity: { value: opacity },
+        uFresnelPower: { value: 2.0 },
+        envMap: { value: envTexture },
+      },
+      vertexShader: `
+        varying vec3 vNormal;
+        varying vec3 vViewDir;
+        varying vec3 vWorldNormal;
+        varying float vRadialDist;
+        void main() {
+          vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+          vNormal = normalize(normalMatrix * normal);
+          vViewDir = normalize(-mvPos.xyz);
+          vWorldNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+          vRadialDist = length(position.xy); // distance from Z axis
+          gl_Position = projectionMatrix * mvPos;
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform float uOpacity;
+        uniform float uFresnelPower;
+        varying vec3 vNormal;
+        varying vec3 vViewDir;
+        varying vec3 vWorldNormal;
+        varying float vRadialDist;
+        void main() {
+          // Fresnel: edges (thin) → transparent, face-on (thick) → opaque
+          float fresnel = 1.0 - abs(dot(vNormal, vViewDir));
+          fresnel = pow(fresnel, uFresnelPower);
+
+          // Simple lighting
+          vec3 lightDir = normalize(vec3(0.5, 1.0, 0.8));
+          float diff = max(dot(vWorldNormal, lightDir), 0.0) * 0.7 + 0.3;
+
+          // Metallic tint
+          vec3 col = uColor * diff;
+          // Add subtle specular
+          vec3 halfDir = normalize(lightDir + vViewDir);
+          float spec = pow(max(dot(vNormal, halfDir), 0.0), 64.0);
+          col += vec3(0.4) * spec;
+
+          // Opacity: base * (1 - fresnel) → edges are transparent
+          float alpha = uOpacity * (1.0 - fresnel * 0.85);
+
+          gl_FragColor = vec4(col, alpha);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.FrontSide,
+      clippingPlanes: clip,
+    });
+  } else {
+    params.transparent = opacity < 1;
+    params.opacity = opacity;
+    params.depthWrite = true;
+  }
+
+  return new THREE.MeshStandardMaterial(params);
+}
+
+function applyHeatmapColors(geo) {
+  const positions = geo.attributes.position;
+  const count = positions.count;
+  const colors = new Float32Array(count * 3);
+
+  let minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < count; i++) {
+    const z = positions.getZ(i);
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+
+  for (let i = 0; i < count; i++) {
+    const z = positions.getZ(i);
+    const t = (z - minZ) / (maxZ - minZ);
+    // Blue (cold) → Red (hot)
+    colors[i * 3] = t;
+    colors[i * 3 + 1] = 0.1 + 0.3 * (1 - Math.abs(t - 0.5) * 2);
+    colors[i * 3 + 2] = 1 - t;
+  }
+
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+}
+
+function loadSTL(buffer) {
+  const loader = new STLLoader();
+  geometry = loader.parse(buffer);
+  geometry.computeVertexNormals();
+  applyHeatmapColors(geometry);
+
+  if (mesh) scene.remove(mesh);
+
+  const mat = createMaterial(
+    parseFloat(document.getElementById('opacity').value),
+    document.getElementById('color-mode').value,
+    document.getElementById('render-mode').value
+  );
+  mesh = new THREE.Mesh(geometry, mat);
+  scene.add(mesh);
+
+  // Center
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+  controls.target.copy(center);
+
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  camera.position.set(center.x + maxDim, center.y + maxDim * 0.5, center.z + maxDim * 0.8);
+  controls.update();
+
+  // Update clip sliders range
+  document.getElementById('clipx').min = Math.floor(box.min.x - 10);
+  document.getElementById('clipx').max = Math.ceil(box.max.x + 10);
+  document.getElementById('clipx').value = Math.ceil(box.max.x + 10);
+  document.getElementById('clipy').min = Math.floor(box.min.y - 10);
+  document.getElementById('clipy').max = Math.ceil(box.max.y + 10);
+  document.getElementById('clipy').value = Math.ceil(box.max.y + 10);
+  document.getElementById('clipz').min = Math.floor(box.min.z - 10);
+  document.getElementById('clipz').max = Math.ceil(box.max.z + 10);
+  document.getElementById('clipz').value = Math.ceil(box.max.z + 10);
+
+  document.getElementById('drop-zone').style.display = 'none';
+}
+
+function updateMaterial() {
+  if (!mesh) return;
+  const opacity = parseFloat(document.getElementById('opacity').value);
+  const colorName = document.getElementById('color-mode').value;
+  const mode = document.getElementById('render-mode').value;
+
+  const mat = createMaterial(opacity, colorName, mode);
+  if (colorName === 'heatmap') {
+    mat.vertexColors = true;
+    mat.color.set(0xffffff);
+  }
+  mesh.material = mat;
+}
+
+// Controls
+document.getElementById('opacity').oninput = (e) => {
+  document.getElementById('opacity-val').textContent = e.target.value;
+  updateMaterial();
+};
+
+document.getElementById('clipx').oninput = (e) => {
+  clipPlanes[0].constant = parseFloat(e.target.value);
+  document.getElementById('clipx-val').textContent = e.target.value;
+};
+document.getElementById('clipy').oninput = (e) => {
+  clipPlanes[1].constant = parseFloat(e.target.value);
+  document.getElementById('clipy-val').textContent = e.target.value;
+};
+document.getElementById('clipz').oninput = (e) => {
+  clipPlanes[2].constant = parseFloat(e.target.value);
+  document.getElementById('clipz-val').textContent = e.target.value;
+};
+
+document.getElementById('render-mode').onchange = updateMaterial;
+document.getElementById('color-mode').onchange = updateMaterial;
+
+document.getElementById('file-input').onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  file.arrayBuffer().then(loadSTL);
+};
+
+// Drag & drop
+document.body.addEventListener('dragover', (e) => { e.preventDefault(); });
+document.body.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (file && file.name.endsWith('.stl')) {
+    file.arrayBuffer().then(loadSTL);
+  }
+});
+
+window.resetView = () => {
+  if (geometry) {
+    const box = geometry.boundingBox;
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    controls.target.copy(center);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    camera.position.set(center.x + maxDim, center.y + maxDim * 0.5, center.z + maxDim * 0.8);
+  }
+};
+
+window.toggleClip = () => {
+  clipEnabled = !clipEnabled;
+  updateMaterial();
+};
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// Auto-load from desktop if available
+fetch('file:///C:/Users/ultra/OneDrive/Desktop/AerospikeV4.stl')
+  .then(r => r.arrayBuffer()).then(loadSTL).catch(() => {});
+</script>
+</body>
+</html>

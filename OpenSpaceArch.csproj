@@ -6,10 +6,44 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>OpenSpaceArch</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <!-- PicoGK Core (forked, headless, Viewer stripped) -->
   <ItemGroup>
-    <PackageReference Include="PicoGK" Version="1.7.7.4" />
+    <ProjectReference Include="Core/OpenSpaceArch.Core.csproj" />
+  </ItemGroup>
+
+  <!-- LEAP 71 ShapeKernel consumes our forked Core via namespace PicoGK.
+       Exclude files that depend on the stripped Viewer API or deleted VoxelsIo helpers.
+       LatticeLibrary is not used by Engine — omitted entirely. -->
+  <ItemGroup>
+    <Compile Include="../PicoGK/LEAP71_ShapeKernel/ShapeKernel/**/*.cs"
+             Exclude="../PicoGK/LEAP71_ShapeKernel/ShapeKernel/Visualizations/**/*.cs;../PicoGK/LEAP71_ShapeKernel/ShapeKernel/Functions/ShExportFunctions.cs" />
+  </ItemGroup>
+
+  <!-- Exclude Core/SmokeTest folder from main csproj glob -->
+  <ItemGroup>
+    <Compile Remove="Core/**" />
+    <Compile Remove="SmokeTest/**" />
+  </ItemGroup>
+
+  <!-- Silk.NET + ImGui for custom cinematic viewer (Phase 1+) -->
+  <ItemGroup>
+    <PackageReference Include="Silk.NET.OpenGL" Version="2.22.0" />
+    <PackageReference Include="Silk.NET.Windowing" Version="2.22.0" />
+    <PackageReference Include="Silk.NET.Input" Version="2.22.0" />
+    <PackageReference Include="Silk.NET.Maths" Version="2.22.0" />
+    <PackageReference Include="Silk.NET.OpenGL.Extensions.ImGui" Version="2.22.0" />
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+  </ItemGroup>
+
+  <!-- Copy GLSL shader files next to the executable so AppMain.HandleLoad can read them -->
+  <ItemGroup>
+    <None Include="Viewer/Shaders/*.vert;Viewer/Shaders/*.frag">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Shaders/%(Filename)%(Extension)</Link>
+    </None>
   </ItemGroup>
 
 </Project>

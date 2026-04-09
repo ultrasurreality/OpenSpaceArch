@@ -1,1 +1,33 @@
-bin/\nobj/\n*.user\n*.stl\n*.vdb\n.vs/
+# Build outputs
+bin/
+obj/
+*.user
+.vs/
+
+# Generated artifacts
+*.stl
+*.vdb
+
+# ImGui per-user layout
+imgui.ini
+
+# Logs
+*.log
+
+# Secrets
+.env
+*.env
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Python temp
+__pycache__/
+*.pyc

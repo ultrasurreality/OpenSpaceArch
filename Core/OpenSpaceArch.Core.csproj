@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>PicoGK</RootNamespace>
+    <AssemblyName>OpenSpaceArch.Core</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Exclude SmokeTest subfolder — it has its own csproj and shouldn't be part of Core library -->
+  <ItemGroup>
+    <Compile Remove="SmokeTest/**" />
+    <None Remove="SmokeTest/**" />
+    <EmbeddedResource Remove="SmokeTest/**" />
+  </ItemGroup>
+
+  <!-- Native kernel (OpenVDB + deps) copied next to the executable so P/Invoke finds them -->
+  <ItemGroup>
+    <None Include="native/picogk.1.7.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>picogk.1.7.dll</Link>
+    </None>
+    <None Include="native/blosc.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>blosc.dll</Link>
+    </None>
+    <None Include="native/lz4.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>lz4.dll</Link>
+    </None>
+    <None Include="native/tbb12.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>tbb12.dll</Link>
+    </None>
+    <None Include="native/zlib1.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>zlib1.dll</Link>
+    </None>
+    <None Include="native/zstd.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>zstd.dll</Link>
+    </None>
+  </ItemGroup>
+
+</Project>

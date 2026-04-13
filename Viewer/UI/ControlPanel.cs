@@ -425,6 +425,14 @@ public sealed class ControlPanel
             renderer.ClearColor = bg;
 
         ImGui.Separator();
+        ImGui.TextDisabled("Cross-section");
+        float clipZ = renderer.ClipZ;
+        if (ImGui.SliderFloat("Slice Z", ref clipZ, -10f, 160f, "%.0f mm"))
+            renderer.ClipZ = clipZ;
+        if (ImGui.Button("Reset slice", new Vector2(100, 0)))
+            renderer.ClipZ = -999f;
+
+        ImGui.Separator();
         ImGui.TextDisabled("Shader hot reload");
         bool ok = renderer.LastShaderReloadMessage == "OK" || renderer.LastShaderReloadMessage == "initial load";
         ImGui.PushStyleColor(ImGuiCol.Text, ok

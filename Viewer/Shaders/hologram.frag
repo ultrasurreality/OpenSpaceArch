@@ -11,6 +11,7 @@ uniform float uTime;
 uniform float uRevealProgress;
 uniform vec3 uHoloColor;
 uniform vec3 uMetalColor;
+uniform float uClipZ;       // cross-section slider: discard below this Z
 
 out vec4 fragColor;
 
@@ -42,6 +43,8 @@ float noise3(vec3 p) {
 }
 
 void main() {
+    if (vWorldPos.z < uClipZ) discard;  // cross-section cut
+
     float n = noise3(vWorldPos * 0.04);
     if (n > uRevealProgress) discard;
 

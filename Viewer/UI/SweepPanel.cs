@@ -15,7 +15,9 @@
 //
 // See ARCHITECTURE.md, Phase 2.
 
+using System.Diagnostics;
 using System.Numerics;
+using System.Text.Json;
 using ImGuiNET;
 using OpenSpaceArch.Engine;
 using OpenSpaceArch.Engine.CSP;
@@ -84,20 +86,24 @@ public sealed class SweepPanel
         // Pin thrust readout — so user knows what the sweep is varying around
         ImGui.TextDisabled($"Fixed: F={_cfg.FixedThrust / 1000f:F1}kN · voxel={_cfg.FixedVoxel:F2}mm");
 
-        if (ImGui.Button("Run Sweep", new Vector2(100, 24)))
+        if (ImGui.Button("Quick (500)", new Vector2(80, 24)))
             RunSweep();
+
+        ImGui.SameLine();
+        if (ImGui.Button("pymoo NSGA-III", new Vector2(110, 24)))
+            RunPymoo();
 
         ImGui.SameLine();
 
         bool hasResults = _results.Count > 0;
         if (!hasResults) ImGui.BeginDisabled();
-        if (ImGui.Button("Apply Best", new Vector2(100, 24)))
+        if (ImGui.Button("Apply Best", new Vector2(85, 24)))
             ApplyBest();
         if (!hasResults) ImGui.EndDisabled();
 
         ImGui.SameLine();
         if (hasResults)
-            ImGui.TextDisabled($"{_lastSweepMs} ms");
+            ImGui.TextDisabled($"{_lastSweepMs}ms {_results.Count} pts");
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -322,10 +328,96 @@ public sealed class SweepPanel
 
     private void RunSweep()
     {
-        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var sw = Stopwatch.StartNew();
         _results = OuterSweep.Run(_cfg);
-        stopwatch.Stop();
-        _lastSweepMs = stopwatch.ElapsedMilliseconds;
+        sw.Stop();
+        _lastSweepMs = sw.ElapsedMilliseconds;
+    }
+
+    private void RunPymoo()
+    {
+        try
+        {
+            string scriptDir = Path.Combine(AppContext.BaseDirectory);
+            // Walk up to find project root
+            string root = AppContext.BaseDirectory;
+            for (int i = 0; i < 6; i++)
+            {
+                if (File.Exists(Path.Combine(root, "OpenSpaceArch.csproj"))) break;
+                var p = Directory.GetParent(root);
+                if (p == null) break;
+                root = p.FullName;
+            }
+            string script = Path.Combine(root, "Engine", "CSP", "PymooSweep.py");
+            string jsonPath = Path.Combine(root, "pareto_results.json");
+
+            var psi = new ProcessStartInfo("python", $"\"{script}\" 200 500 \"{jsonPath}\"")
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            var sw = Stopwatch.StartNew();
+            var proc = Process.Start(psi);
+            proc?.WaitForExit(60000);
+            sw.Stop();
+            _lastSweepMs = sw.ElapsedMilliseconds;
+
+            if (File.Exists(jsonPath))
+                LoadParetoJson(jsonPath);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[pymoo] Error: {ex.Message}");
+        }
+    }
+
+    private void LoadParetoJson(string path)
+    {
+        try
+        {
+            var json = File.ReadAllText(path);
+            using var doc = JsonDocument.Parse(json);
+            var solutions = doc.RootElement.GetProperty("solutions");
+
+            _results.Clear();
+            foreach (var sol in solutions.EnumerateArray())
+            {
+                var spec = new AeroSpec
+                {
+                    F_thrust = _cfg.FixedThrust,
+                    Pc = (float)sol.GetProperty("Pc").GetDouble(),
+                    OF_ratio = (float)sol.GetProperty("OF").GetDouble(),
+                    CR = (float)sol.GetProperty("CR").GetDouble(),
+                    Lstar = (float)sol.GetProperty("Lstar").GetDouble(),
+                    SF = (float)sol.GetProperty("SF").GetDouble(),
+                    channelTwistTurns = (float)sol.GetProperty("Twist").GetDouble(),
+                    voxelSize = _cfg.FixedVoxel,
+                };
+
+                _results.Add(new SweepResult(
+                    Seed: 0,
+                    Spec: spec,
+                    Valid: true,
+                    FailReasons: "OK",
+                    Isp_SL: (float)sol.GetProperty("Isp").GetDouble(),
+                    TWRatio: _cfg.FixedThrust / ((float)sol.GetProperty("mass").GetDouble() * 9.81f),
+                    MassEstimate_kg: (float)sol.GetProperty("mass").GetDouble(),
+                    SigmaThermal_MPa: (float)sol.GetProperty("stress_MPa").GetDouble(),
+                    SpatialConflicts: 0,
+                    zTotal_mm: 0f,
+                    qThroat_MW: 0f,
+                    ChRadiusMin_mm: 0f,
+                    NChannels: 0));
+            }
+
+            Console.WriteLine($"[pymoo] Loaded {_results.Count} Pareto solutions from {path}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[pymoo] JSON load error: {ex.Message}");
+        }
     }
 
     private void ApplyBest()

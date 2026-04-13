@@ -26,6 +26,7 @@ public sealed class Renderer : IDisposable
     public Vector3 ClearColor = new(0.02f, 0.04f, 0.08f);
     public Vector3 HoloColor = new(0.25f, 0.75f, 1.0f);   // Iron Man blue
     public Vector3 MetalColor = new(0.85f, 0.55f, 0.25f); // copper
+    public float ClipZ = -999f;  // cross-section slider (below everything = no clip)
 
     public EngineState State { get; set; } = EngineState.Materializing;
 
@@ -173,6 +174,7 @@ public sealed class Renderer : IDisposable
         _hologram.SetMatrix4("uProj", proj);
         _hologram.SetVec3("uCameraPos", camPos);
         _hologram.SetFloat("uTime", _time);
+        _hologram.SetFloat("uClipZ", ClipZ);
         _hologram.SetVec3("uHoloColor", HoloColor);
         _hologram.SetVec3("uMetalColor", MetalColor);
 
@@ -193,6 +195,7 @@ public sealed class Renderer : IDisposable
         _engineRunning.SetMatrix4("uProj", proj);
         _engineRunning.SetVec3("uCameraPos", camPos);
         _engineRunning.SetFloat("uTime", _time);
+        _engineRunning.SetFloat("uClipZ", ClipZ);
         _engineRunning.SetFloat("uThrottle", Startup?.Throttle ?? 1f);
 
         float zmin = Spec?.zTip ?? 0f;

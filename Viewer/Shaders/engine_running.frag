@@ -14,6 +14,7 @@ uniform float uThrottle;
 uniform float uZmin;
 uniform float uZmax;
 uniform sampler1D uHeatProfile;
+uniform float uClipZ;       // cross-section slider
 
 out vec4 fragColor;
 
@@ -28,6 +29,8 @@ vec3 heatRamp(float t) {
 }
 
 void main() {
+    if (vWorldPos.z < uClipZ) discard;  // cross-section cut
+
     float zT = clamp((vWorldPos.z - uZmin) / max(uZmax - uZmin, 0.0001), 0.0, 1.0);
     vec2 heat = texture(uHeatProfile, zT).rg; // R = temperature, G = heat flux
 

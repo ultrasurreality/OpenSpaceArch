@@ -64,7 +64,7 @@ public static class AppMain
 
     public static void Run()
     {
-        Library.InitHeadless(voxelSizeMM: 1.0f);
+        Library.InitHeadless(voxelSizeMM: 0.5f);
 
         _app = AppWindow.Create(1600, 900, "OpenSpaceArch — Cinematic Viewer + Simulation");
         _app.OnLoad += HandleLoad;

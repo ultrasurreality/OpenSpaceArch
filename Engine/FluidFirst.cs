@@ -32,224 +32,333 @@ public static class FluidFirst
         var sw = Stopwatch.StartNew();
         float LapSec() { var s = (float)sw.Elapsed.TotalSeconds; sw.Restart(); return s; }
 
-        Library.Log("[staged] SDF Composition with per-stage reveal callbacks");
+        Library.Log("[staged] CHANNELS-FIRST: channels → gas path → offset → solid");
 
-        // STEP 1: Analytical SDFs (shroud + spike voxelized together as preview)
-        var shroudSDF = new RevolutionSDF(
-            z => ChamberSizing.ShroudProfile(S, z), S.zCowl, S.zInjector);
-        var spikeSDF = new RevolutionSDF(
-            z => ChamberSizing.SpikeProfile(S, z), S.zTip, S.zInjector);
+        // ══════════════════════════════════════
+        // STEP 1: CHANNELS FIRST (the primary structure)
+        // Physics determines sizing, routing places them in 3D.
+        // ══════════════════════════════════════
+        var routeS = ChannelRouter.RouteShroudChannels(S);
+        Voxels voxChShroud = BuildChannelVoids(S, routeS, isShroud: true);
 
+        var routeP = ChannelRouter.RouteSpikeChannels(S);
+        Voxels voxChSpike = routeP.Spines.Count > 0
+            ? BuildChannelVoids(S, routeP, isShroud: false)
+            : new Voxels();
+
+        Voxels voxChAll = new Voxels();
+        voxChAll.BoolAdd(voxChShroud);
+        voxChAll.BoolAdd(voxChSpike);
+        onStage(new StageResult(StageId.Channels, new Mesh(voxChAll),
+            $"Cooling channels ({routeS.Spines.Count}+{routeP.Spines.Count})", LapSec()));
+
+        // ══════════════════════════════════════
+        // STEP 2: GAS PATH — split into Nozzle / Chamber / Dome
+        // (builds AFTER channels — adapts to them)
+        // ══════════════════════════════════════
+        Voxels voxNozzle = BuildNozzleVoid(S);
+        onStage(new StageResult(StageId.Nozzle, new Mesh(voxNozzle),
+            "Nozzle (convergent + throat)", LapSec()));
+
+        Voxels voxChamber = BuildChamberVoid(S);
+        onStage(new StageResult(StageId.Chamber, new Mesh(voxChamber),
+            "Combustion chamber", LapSec()));
+
+        Voxels voxDome = BuildDomeVoid(S);
+        onStage(new StageResult(StageId.Dome, new Mesh(voxDome),
+            "Injector dome", LapSec()));
+
+        Voxels voxGas = voxNozzle;
+        voxGas.BoolAdd(voxChamber);
+        voxGas.BoolAdd(voxDome);
+
+        // ══════════════════════════════════════
+        // STEP 3: MUTUAL EXCLUSION (channels stay wallT from gas)
+        // ══════════════════════════════════════
+        float minWall = S.minPrintWall;
+        voxChShroud.BoolSubtract(voxGas.voxOffset(minWall));
+        if (routeP.Spines.Count > 0)
         {
-            float bboxR = S.rShroudChamber + 15f;
-            BBox3 bb = new(new(-bboxR, -bboxR, S.zTip - 5f), new(bboxR, bboxR, S.zInjector + 5f));
-            Voxels voxShroudOnly = new Voxels(shroudSDF, bb);
-            Voxels voxSpikeOnly = new Voxels(spikeSDF, bb);
-            Voxels voxPreview = voxShroudOnly + voxSpikeOnly;
-            onStage(new StageResult(StageId.AnalyticalSdfs, new Mesh(voxPreview),
-                "Analytical SDFs (shroud + spike)", LapSec()));
+            voxChSpike.BoolSubtract(voxGas.voxOffset(minWall));
+            voxChShroud.BoolSubtract(voxChSpike.voxOffset(minWall));
+            voxChSpike.BoolSubtract(voxChShroud.voxOffset(minWall));
         }
 
-        // STEP 2: Channel SDFs
-        IImplicit? chShroud = null;
-        IImplicit? chSpike = null;
+        // ══════════════════════════════════════
+        // STEP 4: UNION ALL VOIDS
+        // ══════════════════════════════════════
+        Voxels voxInner = voxChShroud;  // channels first in union
+        voxInner.BoolAdd(voxChSpike);
+        voxInner.BoolAdd(voxGas);       // gas path joins channels
+        onStage(new StageResult(StageId.AllVoids, new Mesh(voxInner),
+            "All fluid voids", LapSec()));
 
-        if (S.channelMode == ChannelMode.Routed_v5b)
-        {
-            // v7: routing is purely analytical — no temp voxelization needed
-            var routeS = ChannelRouter.RouteShroudChannels(S);
-            chShroud = new RoutedChannelFieldImplicit(S, routeS, isShroud: true);
+        // STEP 5: Walls = offset from voids
+        float wallT = MathF.Max(HeatTransfer.WallThickness(S, S.zThroat), S.minPrintWall) + S.minPrintWall;
+        Voxels voxOuter = voxInner.voxOffset(wallT);
 
-            var routeP = ChannelRouter.RouteSpikeChannels(S);
-            chSpike = routeP.Spines.Count > 0
-                ? new RoutedChannelFieldImplicit(S, routeP, isShroud: false)
-                : new ChannelFieldImplicit(S, isShroud: false);
-        }
-        else
-        {
-            chShroud = new ChannelFieldImplicit(S, isShroud: true);
-            chSpike = new ChannelFieldImplicit(S, isShroud: false);
-        }
+        // STEP 6: Fluid-first subtract + open nozzle exit + drill LOX bore
+        Voxels voxSolid = voxOuter;
+        voxSolid.BoolSubtract(voxInner);
 
-        // Channel preview: voxelize channel fields alone (narrow bbox around wall band)
-        {
-            float bboxR = S.rShroudChamber + 15f;
-            BBox3 bb = new(new(-bboxR, -bboxR, S.zTip - 5f), new(bboxR, bboxR, S.zInjector + 5f));
-            Voxels voxChanPreview = new Voxels(chShroud, bb);
-            if (chSpike != null)
-                voxChanPreview += new Voxels(chSpike, bb);
-            onStage(new StageResult(StageId.ChannelSdfs, new Mesh(voxChanPreview),
-                "Cooling channel SDFs", LapSec()));
-        }
+        // Trim below cowl (remove offset cap at nozzle exit)
+        voxSolid.Trim(new BBox3(
+            new Vector3(-200f, -200f, S.zCowl - wallT),
+            new Vector3(200f, 200f, S.zInjector + 20f)));
 
-        // STEP 3: Core body
-        var engineBody = new EngineBodyImplicit(S, shroudSDF, spikeSDF, chShroud, chSpike);
-        BBox3 bodyBBox = engineBody.GetBBox();
+        // Add spike nozzle body (solid cone, aerospike contour)
+        Voxels voxSpike = BuildSpikeBody(S);
+        onStage(new StageResult(StageId.Spike, new Mesh(voxSpike),
+            "Aerospike nozzle cone", LapSec()));
+        voxSolid.BoolAdd(voxSpike);
 
-        Voxels voxSolid;
-        if (buildMode == BuildMode.ZSliceSlabs)
-        {
-            // Z-slice mode: chop bbox along Z, voxelize each slab separately, emit each as a stage.
-            // Slabs overlap by 1 voxel to avoid surface seams during marching cubes.
-            voxSolid = new Voxels();
-            float zMin = bodyBBox.vecMin.Z;
-            float zMax = bodyBBox.vecMax.Z;
-            float slabH = (zMax - zMin) / zSliceCount;
-            float overlap = MathF.Max(S.voxelSize * 2f, 0.5f);
+        // Drill axial LOX manifold
+        voxSolid.BoolSubtract(BuildAxialManifold(S));
 
-            for (int i = 0; i < zSliceCount; i++)
-            {
-                float z0 = zMin + i * slabH - (i > 0 ? overlap : 0f);
-                float z1 = zMin + (i + 1) * slabH + (i < zSliceCount - 1 ? overlap : 0f);
-                BBox3 slabBBox = new(
-                    new Vector3(bodyBBox.vecMin.X, bodyBBox.vecMin.Y, z0),
-                    new Vector3(bodyBBox.vecMax.X, bodyBBox.vecMax.Y, z1));
+        onStage(new StageResult(StageId.Shell, new Mesh(voxSolid),
+            $"Engine shell (wallT={wallT:F2}mm)", LapSec()));
 
-                Voxels voxSlab = new Voxels(engineBody, slabBBox);
-                voxSolid.BoolAdd(voxSlab);
-
-                // Emit slab as its own stage so viewer reveals it incrementally
-                onStage(new StageResult(StageId.CoreBodySlab, new Mesh(voxSlab),
-                    $"Core slab {i + 1}/{zSliceCount} (z={z0:F0}..{z1:F0})", LapSec()));
-            }
-        }
-        else
-        {
-            voxSolid = new Voxels(engineBody, bodyBBox);
-            onStage(new StageResult(StageId.CoreBody, new Mesh(voxSolid),
-                "Core body (SDF composition)", LapSec()));
-        }
-
-        // STEP 4: Lattice components (each reported separately)
-        Voxels v1 = BuildAxialManifold(S); voxSolid += v1;
-        onStage(new StageResult(StageId.AxialManifold, new Mesh(v1), "Axial LOX manifold", LapSec()));
-
+        // STEP 7: Lattice additions
         Voxels v2 = BuildShroudCollector(S); voxSolid += v2;
-        onStage(new StageResult(StageId.ShroudCollector, new Mesh(v2), "Shroud collector ring", LapSec()));
+        onStage(new StageResult(StageId.Collector, new Mesh(v2), "CH4 collector", LapSec()));
 
         Voxels v3 = BuildShroudInlet(S); voxSolid += v3;
-        onStage(new StageResult(StageId.ShroudInlet, new Mesh(v3), "Shroud inlet ring", LapSec()));
+        onStage(new StageResult(StageId.Inlet, new Mesh(v3), "CH4 inlet", LapSec()));
 
         Voxels v4 = BuildFeedPorts(S); voxSolid += v4;
-        onStage(new StageResult(StageId.FeedPorts, new Mesh(v4), "Fuel/LOX/igniter ports", LapSec()));
+        onStage(new StageResult(StageId.FeedPorts, new Mesh(v4), "Feed ports", LapSec()));
 
         Voxels v5 = BuildSpikeVanes(S); voxSolid += v5;
-        onStage(new StageResult(StageId.SpikeVanes, new Mesh(v5), "Spike structural vanes", LapSec()));
+        onStage(new StageResult(StageId.SpikeVanes, new Mesh(v5), "Spike vanes", LapSec()));
 
         Voxels v6 = BuildTopFlange(S); voxSolid += v6;
-        onStage(new StageResult(StageId.TopFlange, new Mesh(v6), "Top mounting flange", LapSec()));
+        onStage(new StageResult(StageId.TopFlange, new Mesh(v6), "Top flange", LapSec()));
 
-        // STEP 5: Smoothen
-        voxSolid.Smoothen(0.2f);
-        onStage(new StageResult(StageId.Smoothen, new Mesh(voxSolid), "Light smoothing pass", LapSec()));
+        // Smoothen + bores (no separate layers — internal post-processing)
+        voxSolid.Smoothen(0.3f);
+        voxSolid -= BuildPostSmoothingBores(S);
 
-        // STEP 6: Post bores
-        Voxels bores = BuildPostSmoothingBores(S);
-        voxSolid -= bores;
-        onStage(new StageResult(StageId.PostBores, new Mesh(bores), "Post-smoothing bores", LapSec()));
-
-        // Final combined
         onStage(new StageResult(StageId.Final, new Mesh(voxSolid), "Final engine", LapSec()));
-
         return voxSolid;
     }
 
     public static Voxels Build(AeroSpec S)
     {
         Library.Log("╔══════════════════════════════════════════╗");
-        Library.Log("║  SDF COMPOSITION: ONE field → voxels     ║");
-        Library.Log("║  Chamber + channels + wall = 1 equation  ║");
+        Library.Log("║  CHANNELS-FIRST: channels → gas → solid  ║");
+        Library.Log("║  Channels are primary. Chamber adapts.    ║");
         Library.Log("╚══════════════════════════════════════════╝");
 
         // ══════════════════════════════════════
-        // STEP 1: ANALYTICAL SDFs (no voxels yet)
+        // STEP 1: CHANNELS FIRST
         // ══════════════════════════════════════
-        Library.Log("Step 1: Analytical SDFs...");
+        Library.Log("Step 1: Channels (primary structure)...");
+        var routeS = ChannelRouter.RouteShroudChannels(S);
+        Library.Log($"  Shroud: {routeS.Spines.Count} channels.");
+        Voxels voxChShroud = BuildChannelVoids(S, routeS, isShroud: true);
 
-        var shroudSDF = new RevolutionSDF(
-            z => ChamberSizing.ShroudProfile(S, z), S.zCowl, S.zInjector);
-        var spikeSDF = new RevolutionSDF(
-            z => ChamberSizing.SpikeProfile(S, z), S.zTip, S.zInjector);
-        Library.Log("  Shroud + Spike SDFs defined.");
+        var routeP = ChannelRouter.RouteSpikeChannels(S);
+        Library.Log($"  Spike: {routeP.Spines.Count} channels.");
+        Voxels voxChSpike = routeP.Spines.Count > 0
+            ? BuildChannelVoids(S, routeP, isShroud: false)
+            : new Voxels();
 
         // ══════════════════════════════════════
-        // STEP 2: CHANNEL SDFs (IImplicit, no voxels)
+        // STEP 2: GAS PATH (adapts to channels)
         // ══════════════════════════════════════
-        Library.Log("Step 2: Channel SDFs...");
+        Library.Log("Step 2: Gas path (after channels)...");
+        Voxels voxGas = BuildGasPathVoid(S);
 
-        IImplicit? chShroud = null;
-        IImplicit? chSpike = null;
-
-        if (S.channelMode == ChannelMode.Routed_v5b)
+        // ══════════════════════════════════════
+        // STEP 3: MUTUAL EXCLUSION
+        // ══════════════════════════════════════
+        Library.Log("Step 3: Mutual exclusion...");
+        float minWall = S.minPrintWall;
+        voxChShroud.BoolSubtract(voxGas.voxOffset(minWall));
+        if (routeP.Spines.Count > 0)
         {
-            // v7: routing is purely analytical — no temp voxelization
-            Library.Log("  Routing: analytical helical paths...");
-
-            var routeS = ChannelRouter.RouteShroudChannels(S);
-            chShroud = new RoutedChannelFieldImplicit(S, routeS, isShroud: true);
-            Library.Log($"  Shroud: {routeS.Spines.Count} routed channels.");
-
-            var routeP = ChannelRouter.RouteSpikeChannels(S);
-            if (routeP.Spines.Count > 0)
-                chSpike = new RoutedChannelFieldImplicit(S, routeP, isShroud: false);
-            else
-                chSpike = new ChannelFieldImplicit(S, isShroud: false);
-            Library.Log($"  Spike: {routeP.Spines.Count} routed channels (fallback: implicit).");
+            voxChSpike.BoolSubtract(voxGas.voxOffset(minWall));
+            voxChShroud.BoolSubtract(voxChSpike.voxOffset(minWall));
+            voxChSpike.BoolSubtract(voxChShroud.voxOffset(minWall));
         }
-        else
-        {
-            chShroud = new ChannelFieldImplicit(S, isShroud: true);
-            chSpike = new ChannelFieldImplicit(S, isShroud: false);
-            Library.Log("  Channels: ChannelFieldImplicit (v5 helical).");
-        }
+        Library.Log("  Channels clipped from gas + each other.");
 
         // ══════════════════════════════════════
-        // STEP 3: ONE IMPLICIT → ONE VOXELIZATION
+        // STEP 4: UNION ALL VOIDS
         // ══════════════════════════════════════
-        Library.Log("Step 3: EngineBodyImplicit → voxels (ONE evaluation)...");
-        var engineBody = new EngineBodyImplicit(S, shroudSDF, spikeSDF, chShroud, chSpike);
-        Voxels voxSolid = new Voxels(engineBody, engineBody.GetBBox());
-        Library.Log("  Core body done.");
+        Library.Log("Step 4: Union all voids...");
+        Voxels voxInner = voxChShroud;  // channels first
+        voxInner.BoolAdd(voxChSpike);
+        voxInner.BoolAdd(voxGas);       // gas path joins
+        Library.Log("  Inner volume = channels + gas.");
 
         // ══════════════════════════════════════
-        // STEP 4: ADD LATTICE COMPONENTS
-        // (simple shapes, voxel boolean is fine)
+        // STEP 5: WALLS = OFFSET FROM VOIDS
         // ══════════════════════════════════════
-        Library.Log("Step 4: Lattice additions...");
+        Library.Log("Step 5: Grow walls (voxOffset)...");
+        float wallT = MathF.Max(HeatTransfer.WallThickness(S, S.zThroat), S.minPrintWall) + S.minPrintWall;
+        Voxels voxOuter = voxInner.voxOffset(wallT);
+        Library.Log($"  Wall thickness: {wallT:F2} mm (offset from voids).");
 
-        voxSolid += BuildAxialManifold(S);
-        Library.Log("  + Axial manifold");
+        // ══════════════════════════════════════
+        // STEP 6: FLUID-FIRST SUBTRACT (the moment)
+        // ══════════════════════════════════════
+        Library.Log("Step 6: Subtract voids from shell...");
+        Voxels voxSolid = voxOuter;
+        voxSolid.BoolSubtract(voxInner);
 
+        // Trim below cowl (remove offset cap at nozzle exit)
+        voxSolid.Trim(new BBox3(
+            new Vector3(-200f, -200f, S.zCowl - wallT),
+            new Vector3(200f, 200f, S.zInjector + 20f)));
+
+        // Add spike nozzle body (solid cone — aerospike contour)
+        voxSolid.BoolAdd(BuildSpikeBody(S));
+        Library.Log("  Nozzle exit trimmed + spike body added.");
+
+        // Drill axial LOX manifold as bore (not in void union — was sealing spike)
+        voxSolid.BoolSubtract(BuildAxialManifold(S));
+        Library.Log("  Axial LOX manifold drilled.");
+
+        Library.Log("  Solid = shell - voids - exit - LOX bore.");
+
+        // ══════════════════════════════════════
+        // STEP 7: ADD LATTICE COMPONENTS
+        // ══════════════════════════════════════
+        Library.Log("Step 7: Lattice additions...");
         voxSolid += BuildShroudCollector(S);
-        Library.Log("  + Shroud collector");
-
         voxSolid += BuildShroudInlet(S);
-        Library.Log("  + Shroud inlet");
-
         voxSolid += BuildFeedPorts(S);
-        Library.Log("  + Feed ports");
-
         voxSolid += BuildSpikeVanes(S);
-        Library.Log("  + Spike vanes");
-
         voxSolid += BuildTopFlange(S);
-        Library.Log("  + Top flange");
+        Library.Log("  + Collector, inlet, ports, vanes, flange.");
 
         // ══════════════════════════════════════
-        // STEP 5: LIGHT POLISH (no OverOffset!)
+        // STEP 8: SMOOTHEN
         // ══════════════════════════════════════
-        Library.Log("Step 5: Light smoothen...");
-        voxSolid.Smoothen(0.2f);
+        Library.Log("Step 8: Smoothen...");
+        voxSolid.Smoothen(0.3f);
 
         // ══════════════════════════════════════
-        // STEP 6: POST-SMOOTHING BORES
+        // STEP 9: POST-SMOOTHING BORES
         // ══════════════════════════════════════
-        Library.Log("Step 6: Post-smoothing bores...");
+        Library.Log("Step 9: Post-smoothing bores...");
         voxSolid -= BuildPostSmoothingBores(S);
-        Library.Log("  Bores drilled.");
 
-        Library.Log("Done.");
+        Library.Log("Done — voids-first build complete.");
         return voxSolid;
+    }
+
+    // ─────────────────────────────────────
+    // GAS PATH: split into Nozzle + Chamber + Dome
+    // ─────────────────────────────────────
+
+    static Voxels BuildGasPathVoid(AeroSpec S)
+    {
+        // Full gas path = all three zones
+        Voxels v = BuildAnnularZone(S, S.zCowl, S.zChBot);  // nozzle
+        v.BoolAdd(BuildAnnularZone(S, S.zChBot, S.zChTop));  // chamber
+        v.BoolAdd(BuildAnnularZone(S, S.zChTop, S.zInjector)); // dome
+        return v;
+    }
+
+    static Voxels BuildNozzleVoid(AeroSpec S) => BuildAnnularZone(S, S.zCowl, S.zChBot);
+    static Voxels BuildChamberVoid(AeroSpec S) => BuildAnnularZone(S, S.zChBot, S.zChTop);
+    static Voxels BuildDomeVoid(AeroSpec S) => BuildAnnularZone(S, S.zChTop, S.zInjector);
+
+    /// <summary>Build annular Lattice void between spike and shroud for a z-range.</summary>
+    static Voxels BuildAnnularZone(AeroSpec S, float zStart, float zEnd)
+    {
+        Lattice lat = new Lattice();
+        int nSegs = 48;
+        int nZ = (int)MathF.Max((zEnd - zStart) / 1.5f, 10);
+
+        for (int iz = 0; iz < nZ; iz++)
+        {
+            float z0 = zStart + iz * (zEnd - zStart) / nZ;
+            float z1 = zStart + (iz + 1) * (zEnd - zStart) / nZ;
+
+            float rSpike0 = ChamberSizing.SpikeProfile(S, z0);
+            float rShroud0 = ChamberSizing.ShroudProfile(S, z0);
+            float rSpike1 = ChamberSizing.SpikeProfile(S, z1);
+            float rShroud1 = ChamberSizing.ShroudProfile(S, z1);
+
+            if (rShroud0 < 1f && rShroud1 < 1f) continue;
+
+            float rMid0 = (rSpike0 + rShroud0) / 2f;
+            float rBeam0 = MathF.Max((rShroud0 - rSpike0) / 2f, 0.5f);
+            float rMid1 = (rSpike1 + rShroud1) / 2f;
+            float rBeam1 = MathF.Max((rShroud1 - rSpike1) / 2f, 0.5f);
+
+            for (int ia = 0; ia < nSegs; ia++)
+            {
+                float phi = ia * 2f * MathF.PI / nSegs;
+                float c = MathF.Cos(phi), s = MathF.Sin(phi);
+                lat.AddBeam(
+                    new Vector3(rMid0 * c, rMid0 * s, z0), rBeam0,
+                    new Vector3(rMid1 * c, rMid1 * s, z1), rBeam1);
+            }
+        }
+
+        return new Voxels(lat);
+    }
+
+    // ─────────────────────────────────────
+    // SPIKE NOZZLE BODY: solid cone below cowl (aerospike contour)
+    // This is NOT part of voids-first — it's a separate solid.
+    // Below cowl, gas flows in open air along the spike surface.
+    // ─────────────────────────────────────
+    static Voxels BuildSpikeBody(AeroSpec S)
+    {
+        Lattice lat = new Lattice();
+        int nZ = 60;
+        float zStart = S.zTip;
+        float zEnd = S.zThroat + 5f;
+
+        for (int i = 0; i < nZ; i++)
+        {
+            float z0 = zStart + i * (zEnd - zStart) / nZ;
+            float z1 = zStart + (i + 1) * (zEnd - zStart) / nZ;
+            float r0 = ChamberSizing.SpikeProfile(S, z0);
+            float r1 = ChamberSizing.SpikeProfile(S, z1);
+            if (r0 < 0.3f && r1 < 0.3f) continue;
+            lat.AddBeam(
+                new Vector3(0, 0, z0), MathF.Max(r0, 0.3f),
+                new Vector3(0, 0, z1), MathF.Max(r1, 0.3f));
+        }
+
+        return new Voxels(lat);
+    }
+
+    // ─────────────────────────────────────
+    // CHANNEL VOIDS: Lattice tubes from spine paths
+    // ─────────────────────────────────────
+    static Voxels BuildChannelVoids(AeroSpec S, ChannelRouteResult route, bool isShroud)
+    {
+        Lattice lat = new Lattice();
+
+        foreach (var spine in route.Spines)
+        {
+            for (int i = 0; i < spine.Count - 1; i++)
+            {
+                float z = (spine[i].Z + spine[i + 1].Z) / 2f;
+                float r;
+                if (isShroud)
+                {
+                    var (w, h) = HeatTransfer.ChannelRect(S, z);
+                    r = MathF.Min(w, h) / 2f;  // approximate rectangular as circular
+                }
+                else
+                {
+                    var (w, h) = HeatTransfer.ChannelRectSpike(S, z);
+                    r = MathF.Min(w, h) / 2f;
+                }
+                r = MathF.Max(r, S.minChannel / 2f);
+                lat.AddBeam(spine[i], spine[i + 1], r, r);
+            }
+        }
+
+        return new Voxels(lat);
     }
 
     // ─────────────────────────────────────

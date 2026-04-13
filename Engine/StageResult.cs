@@ -8,19 +8,19 @@ namespace OpenSpaceArch.Engine;
 
 public enum StageId
 {
-    AnalyticalSdfs,      // shroud + spike revolution SDFs voxelized
-    ChannelSdfs,         // routed channel SDFs voxelized alone
-    CoreBodySlab,        // one Z-slice slab of EngineBodyImplicit (multiple per build)
-    CoreBody,            // EngineBodyImplicit → one voxel field (atomic mode)
-    AxialManifold,       // central LOX manifold
-    ShroudCollector,     // toroidal manifold at top
-    ShroudInlet,         // toroidal manifold at bottom
+    Channels,            // cooling channel voids (Lattice tubes)
+    Nozzle,              // convergent section + throat (gas path)
+    Chamber,             // cylindrical combustion section (gas path)
+    Dome,                // injector dome closure (gas path)
+    Spike,               // aerospike nozzle cone (solid body)
+    AllVoids,            // union of all fluid voids
+    Shell,               // solid walls (offset - voids)
+    Collector,           // toroidal manifold at top (hot CH4 out)
+    Inlet,               // toroidal manifold at bottom (cold CH4 in)
     FeedPorts,           // fuel/lox/igniter ports
     SpikeVanes,          // radial structural bridges
     TopFlange,           // mounting plate
-    Smoothen,            // light smoothing pass
-    PostBores,           // injector + film cooling + bolt holes
-    Final                // final combined voxels
+    Final                // final combined engine
 }
 
 public enum BuildMode

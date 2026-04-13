@@ -92,6 +92,29 @@ public sealed class Renderer : IDisposable
         _time = 0;
     }
 
+    /// <summary>Toggle visibility of all meshes with a given StageId.</summary>
+    public void SetStageVisible(StageId stage, bool visible)
+    {
+        foreach (var it in _items)
+            if (it.StageId == stage) it.Visible = visible;
+    }
+
+    /// <summary>Get visibility state for a stage (true if ANY item with that stage is visible).</summary>
+    public bool IsStageVisible(StageId stage)
+    {
+        foreach (var it in _items)
+            if (it.StageId == stage) return it.Visible;
+        return true;
+    }
+
+    /// <summary>Returns all distinct StageIds currently loaded.</summary>
+    public HashSet<StageId> GetLoadedStages()
+    {
+        var set = new HashSet<StageId>();
+        foreach (var it in _items) set.Add(it.StageId);
+        return set;
+    }
+
     public void RenderFrame(double deltaTime, int fbWidth, int fbHeight)
     {
         _time += (float)deltaTime;
@@ -155,6 +178,7 @@ public sealed class Renderer : IDisposable
 
         foreach (var item in _items)
         {
+            if (!item.Visible || item.Mesh.IndexCount == 0) continue;
             float progress = Math.Clamp((_time - item.RevealDelay) / item.RevealDuration, 0f, 1.3f);
             _hologram.SetMatrix4("uModel", item.Transform);
             _hologram.SetFloat("uRevealProgress", progress);
@@ -185,7 +209,8 @@ public sealed class Renderer : IDisposable
 
         foreach (var item in _items)
         {
-            int mode = item.StageId == StageId.ChannelSdfs ? 1 : 0;
+            if (!item.Visible || item.Mesh.IndexCount == 0) continue;
+            int mode = item.StageId == StageId.Channels ? 1 : 0;
             _engineRunning.SetMatrix4("uModel", item.Transform);
             _engineRunning.SetInt("uMode", mode);
             item.Mesh.Draw();
@@ -260,6 +285,7 @@ public sealed class Renderer : IDisposable
         public Matrix4x4 Transform;
         public float RevealDelay;
         public float RevealDuration;
+        public bool Visible = true;
 
         public RenderItem(GpuMesh mesh, StageId stageId, Matrix4x4 transform, float revealDelay, float revealDuration)
         {

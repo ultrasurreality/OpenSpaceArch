@@ -41,6 +41,7 @@ public sealed class ControlPanel
                      AeroSpec lastBuiltSpec, StartupSequence startup, Viability viability)
     {
         DrawMainPanel(pipeline, sceneStageCount);
+        DrawLayersPanel(renderer);
         DrawLogPanel(pipeline);
         DrawEngineStatePanel(renderer, startup, lastBuiltSpec, viability);
         DrawStylePanel(renderer);
@@ -358,6 +359,48 @@ public sealed class ControlPanel
         {
             if (ImGui.Button("Shutdown", new Vector2(200, 44)))
                 ShutdownRequested = true;
+        }
+
+        ImGui.End();
+    }
+
+    private static readonly (StageId id, string name)[] _layerNames =
+    {
+        (StageId.Channels,    "Cooling channels"),
+        (StageId.Nozzle,      "Nozzle (convergent + throat)"),
+        (StageId.Chamber,     "Combustion chamber"),
+        (StageId.Dome,        "Injector dome"),
+        (StageId.Spike,       "Aerospike cone"),
+        (StageId.AllVoids,    "All voids combined"),
+        (StageId.Shell,       "Engine walls"),
+        (StageId.Collector,   "CH4 collector (hot out)"),
+        (StageId.Inlet,       "CH4 inlet (cold in)"),
+        (StageId.FeedPorts,   "Fuel / LOX / igniter ports"),
+        (StageId.SpikeVanes,  "Spike structural ribs"),
+        (StageId.TopFlange,   "Mounting flange"),
+        (StageId.Final,       "Complete engine"),
+    };
+
+    private void DrawLayersPanel(Renderer renderer)
+    {
+        ImGui.SetNextWindowPos(new Vector2(12, 700), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(240, 300), ImGuiCond.FirstUseEver);
+        ImGui.Begin("Layers");
+
+        var loaded = renderer.GetLoadedStages();
+        if (loaded.Count == 0)
+        {
+            ImGui.TextDisabled("(building...)");
+        }
+        else
+        {
+            foreach (var (id, name) in _layerNames)
+            {
+                if (!loaded.Contains(id)) continue;
+                bool vis = renderer.IsStageVisible(id);
+                if (ImGui.Checkbox(name, ref vis))
+                    renderer.SetStageVisible(id, vis);
+            }
         }
 
         ImGui.End();

@@ -339,6 +339,14 @@ public static class DesignSweep
         }
     }
 
+    /// <summary>
+    /// Public wrapper around the silent physics pipeline for the Phase 2
+    /// outer sweep (<see cref="CSP.OuterSweep"/>). Same implementation as
+    /// <see cref="ComputeSilent"/> — exposes it to code outside this class
+    /// without duplicating the 140-line physics sequence.
+    /// </summary>
+    public static void ComputeSilentPublic(AeroSpec S) => ComputeSilent(S);
+
     public static void RunSingle(AeroSpec S)
     {
         var sw = Stopwatch.StartNew();

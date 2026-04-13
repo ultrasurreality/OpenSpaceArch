@@ -18,6 +18,14 @@ public sealed class ControlPanel
     public float VoxelSize = 1.0f;        // mm
     public ChannelMode ChannelMode = ChannelMode.Routed_v5b;
 
+    // Phase 2: remaining bounded variables that the outer sweep varies.
+    // Exposed as sliders so "Apply Best" can write the full winning spec
+    // back, and so the user can hand-tune any design-space variable.
+    public float CR = 4.0f;               // contraction ratio
+    public float Lstar = 0.4f;            // m — characteristic length
+    public float SF = 1.5f;               // safety factor
+    public float TwistTurns = 2.0f;       // helical channel turns
+
     public BuildMode BuildMode = BuildMode.ZSliceSlabs;
     public int ZSliceCount = 24;
 
@@ -44,20 +52,50 @@ public sealed class ControlPanel
             F_thrust = Thrust,
             Pc = PcBar * 1e5f,
             OF_ratio = OF,
+            CR = CR,
+            Lstar = Lstar,
+            SF = SF,
+            channelTwistTurns = TwistTurns,
             voxelSize = VoxelSize,
             channelMode = ChannelMode,
         };
     }
 
+    /// <summary>
+    /// Writes the 8 slider-editable fields of <paramref name="spec"/> back
+    /// into this panel and triggers a regenerate. Used by Phase 2's
+    /// <c>SweepPanel.OnApplyWinner</c> to push a winning design into the
+    /// viewer's normal build flow.
+    /// </summary>
+    public void ApplyFromSpec(AeroSpec spec)
+    {
+        Thrust = spec.F_thrust;
+        PcBar = spec.Pc / 1e5f;
+        OF = spec.OF_ratio;
+        CR = spec.CR;
+        Lstar = spec.Lstar;
+        SF = spec.SF;
+        TwistTurns = spec.channelTwistTurns;
+        VoxelSize = spec.voxelSize;
+        // ChannelMode / BuildMode / ZSliceCount are user-set preferences,
+        // leave untouched.
+        RegenerateRequested = true;
+    }
+
     private void DrawParameterPanel()
     {
         ImGui.SetNextWindowPos(new Vector2(12, 12), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSize(new Vector2(320, 220), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(320, 320), ImGuiCond.FirstUseEver);
         ImGui.Begin("Parameters");
 
         ImGui.SliderFloat("Thrust (N)", ref Thrust, 1000f, 20000f, "%.0f");
         ImGui.SliderFloat("Pc (bar)", ref PcBar, 30f, 200f, "%.0f");
         ImGui.SliderFloat("O/F ratio", ref OF, 2.0f, 4.0f, "%.2f");
+        // Phase 2: CSP bounded-sweep variables exposed as sliders.
+        ImGui.SliderFloat("CR", ref CR, 2.0f, 8.0f, "%.2f");
+        ImGui.SliderFloat("L* (m)", ref Lstar, 0.2f, 1.5f, "%.2f");
+        ImGui.SliderFloat("SF", ref SF, 1.2f, 2.5f, "%.2f");
+        ImGui.SliderFloat("Twist turns", ref TwistTurns, 0.5f, 5.0f, "%.2f");
         ImGui.SliderFloat("Voxel size (mm)", ref VoxelSize, 0.4f, 2.5f, "%.2f");
 
         int chMode = (int)ChannelMode;
@@ -69,7 +107,7 @@ public sealed class ControlPanel
 
     private void DrawBuildModePanel()
     {
-        ImGui.SetNextWindowPos(new Vector2(12, 240), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowPos(new Vector2(12, 340), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowSize(new Vector2(320, 140), ImGuiCond.FirstUseEver);
         ImGui.Begin("Build Mode");
 
@@ -91,7 +129,7 @@ public sealed class ControlPanel
 
     private void DrawPipelinePanel(PipelineController pipeline, int sceneStageCount)
     {
-        ImGui.SetNextWindowPos(new Vector2(12, 388), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowPos(new Vector2(12, 488), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowSize(new Vector2(320, 240), ImGuiCond.FirstUseEver);
         ImGui.Begin("Pipeline");
 

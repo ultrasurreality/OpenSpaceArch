@@ -4,10 +4,16 @@
 // Chamber void + cooling channels + variable wall = ONE equation.
 // No voxel booleans. No OverOffset. No information loss.
 //
-// Formula: dSolid = max(-dVoid, dVoid - shellT)
-//   dVoid < 0 → inside void → not solid
-//   0 < dVoid < shellT → in wall → SOLID
-//   dVoid > shellT → outside → not solid
+// Formula (2026-04-09 fix):
+//   solid = max( shell(gas), -channels_clipped )
+//   where shell(gas) = max(-dGas, dGas - shellT)
+//         channels_clipped = each channel field clipped by min-wall from reference
+//
+// Previous formula unioned channels INTO gas via min, then wrapped one shell
+// of thickness shellT around the union. That made each channel grow its own
+// shellT-radius material bubble, inflating the outer surface and hiding the
+// channel pattern — the engine looked fully solid. Fixed by building the
+// shell around gas ONLY, then boolean-subtracting channels from it.
 //
 // Insight source: design analysis (2026-04-01) — confirmed that
 // chamber wall + channels appear SIMULTANEOUSLY as ONE evaluated field.
@@ -121,28 +127,36 @@ public class EngineBodyImplicit : IImplicit
 
     public float fSignedDistance(in Vector3 v)
     {
-        // 1. Gas path = annular void between shroud and spike
+        // 1. Gas path = annular void between shroud (outer) and spike (inner).
+        //    Correct SDF of annulus A∩B where A = interior of shroud, B = exterior of spike:
+        //      A ∩ B  has  SDF = max(dShroud, -dSpike)
+        //    (negative INSIDE gas, positive outside — standard SDF convention).
         float dShroud = _shroud.fSignedDistance(v);
         float dSpike  = _spike.fSignedDistance(v);
-        float dGas    = MathF.Max(-dShroud, dSpike);
+        float dGas    = MathF.Max(dShroud, -dSpike);
 
-        // 2. Cooling channels with per-void min-wall exclusion
-        //    For each void: channel field clipped by `wallT - dRef`, where
-        //    dRef is the distance OUTSIDE its reference SDF (sign-flipped for inside)
-        float wallT = LerpWall(v.Z);
-        float dVoid = dGas;
+        float wallT  = LerpWall(v.Z);
+        float shellT = LerpShell(v.Z);
+
+        // 2. Main shell: material band of thickness shellT around gas ONLY.
+        //    Standard shell-around-void formula: solid iff 0 ≤ dGas ≤ shellT.
+        //    Produces two shells — one outside shroud, one inside spike.
+        //    Channels are not unioned with gas — they are subtracted below.
+        float solid = MathF.Max(-dGas, dGas - shellT);
+
+        // 3. Subtract cooling channels from shell (boolean subtract on SDF).
+        //    Each channel is clipped by `wallT - dRef` so it stays at least
+        //    wallT away from its reference surface (shroud outside, spike inside).
         for (int i = 0; i < _voids.Count; i++)
         {
             var cv = _voids[i];
             float dRef  = cv.RefSdf.fSignedDistance(v) * cv.Sign;
             float dCh   = cv.Field.fSignedDistance(v);
             float dGood = MathF.Max(dCh, wallT - dRef);
-            dVoid       = MathF.Min(dVoid, dGood);
+            solid = MathF.Max(solid, -dGood);
         }
 
-        // 3. Shell: solid where 0 < dVoid < shellThickness
-        float shellT = LerpShell(v.Z);
-        return MathF.Max(-dVoid, dVoid - shellT);
+        return solid;
     }
 
     public BBox3 GetBBox() => _bbox;

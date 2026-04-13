@@ -22,6 +22,7 @@ public static class AppMain
     private static PipelineController _pipeline = null!;
     private static ControlPanel _controlPanel = null!;
     private static ConstraintsPanel _constraintsPanel = null!;
+    private static SweepPanel _sweepPanel = null!;
     private static ShaderWatcher? _shaderWatcher;
     private static ImGuiController? _imgui;
     private static IInputContext? _input;
@@ -136,6 +137,11 @@ public static class AppMain
         _pipeline = new PipelineController();
         _controlPanel = new ControlPanel();
         _constraintsPanel = new ConstraintsPanel();
+        _sweepPanel = new SweepPanel
+        {
+            // Apply winner → push to ControlPanel sliders → auto regenerate.
+            OnApplyWinner = spec => _controlPanel.ApplyFromSpec(spec)
+        };
 
         _renderer.Camera.Target = new Vector3(0, 0, 100f);
         _renderer.Camera.Distance = 500f;
@@ -336,6 +342,10 @@ public static class AppMain
 
         _controlPanel.Draw(_pipeline, _renderer, _sceneStageCount, _lastBuiltSpec, _startup, _viability);
         _constraintsPanel.Draw(_liveViability);
+        // Phase 2: keep sweep thrust/voxel in sync with whatever the user
+        // is currently targeting via ControlPanel, then draw the panel.
+        _sweepPanel.SyncPinnedInputs(_controlPanel.Thrust, _controlPanel.VoxelSize);
+        _sweepPanel.Draw();
         _imgui?.Render();
     }
 

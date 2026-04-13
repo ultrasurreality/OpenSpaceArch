@@ -11,20 +11,20 @@ namespace OpenSpaceArch.Viewer.UI;
 
 public sealed class ControlPanel
 {
-    // Editable AeroSpec mirror
-    public float Thrust = 5000f;          // N
+    // ── Boundary conditions (mission spec + printer) ──
+    public float Thrust = 5000f;          // N — mission
+    public float VoxelSize = 1.0f;        // mm — printer resolution
+    public ChannelMode ChannelMode = ChannelMode.Routed_v5b;
+    public float MinWall = 0.5f;          // mm — LPBF min wall
+    public float MaxOverhang = 45f;       // degrees — LPBF max overhang
+
+    // ── Design variables (sweep searches these, Manual lets you set directly) ──
     public float PcBar = 110f;            // bar
     public float OF = 3.2f;
-    public float VoxelSize = 1.0f;        // mm
-    public ChannelMode ChannelMode = ChannelMode.Routed_v5b;
-
-    // Phase 2: remaining bounded variables that the outer sweep varies.
-    // Exposed as sliders so "Apply Best" can write the full winning spec
-    // back, and so the user can hand-tune any design-space variable.
-    public float CR = 4.0f;               // contraction ratio
-    public float Lstar = 0.4f;            // m — characteristic length
-    public float SF = 1.5f;               // safety factor
-    public float TwistTurns = 2.0f;       // helical channel turns
+    public float CR = 4.0f;
+    public float Lstar = 0.4f;            // m
+    public float SF = 1.5f;
+    public float TwistTurns = 2.0f;
 
     public BuildMode BuildMode = BuildMode.ZSliceSlabs;
     public int ZSliceCount = 24;
@@ -34,12 +34,13 @@ public sealed class ControlPanel
     public bool IgniteRequested;
     public bool ShutdownRequested;
 
+    // v7: three-tab UI. SweepPanel embedded in Search tab.
+    public SweepPanel? SweepPanel;
+
     public void Draw(PipelineController pipeline, Renderer renderer, int sceneStageCount,
                      AeroSpec lastBuiltSpec, StartupSequence startup, Viability viability)
     {
-        DrawParameterPanel();
-        DrawBuildModePanel();
-        DrawPipelinePanel(pipeline, sceneStageCount);
+        DrawMainPanel(pipeline, sceneStageCount);
         DrawLogPanel(pipeline);
         DrawEngineStatePanel(renderer, startup, lastBuiltSpec, viability);
         DrawStylePanel(renderer);
@@ -58,6 +59,8 @@ public sealed class ControlPanel
             channelTwistTurns = TwistTurns,
             voxelSize = VoxelSize,
             channelMode = ChannelMode,
+            minPrintWall = MinWall,
+            maxOverhang = MaxOverhang,
         };
     }
 
@@ -82,68 +85,116 @@ public sealed class ControlPanel
         RegenerateRequested = true;
     }
 
-    private void DrawParameterPanel()
+    // ─────────────────────────────────────────────────────────────
+    // v7: Main panel with three tabs — Mission / Search / Manual
+    // ─────────────────────────────────────────────────────────────
+
+    private void DrawMainPanel(PipelineController pipeline, int sceneStageCount)
     {
         ImGui.SetNextWindowPos(new Vector2(12, 12), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSize(new Vector2(320, 320), ImGuiCond.FirstUseEver);
-        ImGui.Begin("Parameters");
+        ImGui.SetNextWindowSize(new Vector2(340, 680), ImGuiCond.FirstUseEver);
+        ImGui.Begin("Engine Designer");
+
+        if (ImGui.BeginTabBar("DesignerTabs"))
+        {
+            if (ImGui.BeginTabItem("Mission"))
+            {
+                DrawMissionTab();
+                ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem("Search"))
+            {
+                DrawSearchTab();
+                ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem("Manual"))
+            {
+                DrawManualTab();
+                ImGui.EndTabItem();
+            }
+            ImGui.EndTabBar();
+        }
+
+        ImGui.Separator();
+        DrawBuildSection(pipeline, sceneStageCount);
+
+        ImGui.End();
+    }
+
+    private void DrawMissionTab()
+    {
+        ImGui.TextDisabled("Boundary Conditions");
+        ImGui.Separator();
+
+        ImGui.TextDisabled("Mission spec:");
+        ImGui.SliderFloat("Thrust (N)", ref Thrust, 1000f, 20000f, "%.0f");
+        ImGui.TextDisabled("Propellant: LOX/CH4");
+
+        ImGui.Spacing();
+        ImGui.TextDisabled("Printer constraints:");
+        ImGui.SliderFloat("Min wall (mm)", ref MinWall, 0.3f, 1.5f, "%.2f");
+        ImGui.SliderFloat("Max overhang", ref MaxOverhang, 30f, 60f, "%.0f");
+        ImGui.SliderFloat("Voxel (mm)", ref VoxelSize, 0.4f, 2.5f, "%.2f");
+
+        ImGui.Spacing();
+        int chMode = (int)ChannelMode;
+        if (ImGui.Combo("Channels", ref chMode, "MeshBased v4\0Implicit v5\0Routed v5b\0"))
+            ChannelMode = (ChannelMode)chMode;
+
+        ImGui.Spacing();
+        ImGui.TextDisabled("Everything else is found by Search.");
+    }
+
+    private void DrawSearchTab()
+    {
+        if (SweepPanel == null)
+        {
+            ImGui.TextDisabled("SweepPanel not connected.");
+            return;
+        }
+
+        SweepPanel.SyncPinnedInputs(Thrust, VoxelSize);
+        SweepPanel.DrawContent();
+    }
+
+    private void DrawManualTab()
+    {
+        ImGui.TextDisabled("Direct parameter control");
+        ImGui.Separator();
 
         ImGui.SliderFloat("Thrust (N)", ref Thrust, 1000f, 20000f, "%.0f");
         ImGui.SliderFloat("Pc (bar)", ref PcBar, 30f, 200f, "%.0f");
         ImGui.SliderFloat("O/F ratio", ref OF, 2.0f, 4.0f, "%.2f");
-        // Phase 2: CSP bounded-sweep variables exposed as sliders.
         ImGui.SliderFloat("CR", ref CR, 2.0f, 8.0f, "%.2f");
         ImGui.SliderFloat("L* (m)", ref Lstar, 0.2f, 1.5f, "%.2f");
         ImGui.SliderFloat("SF", ref SF, 1.2f, 2.5f, "%.2f");
-        ImGui.SliderFloat("Twist turns", ref TwistTurns, 0.5f, 5.0f, "%.2f");
-        ImGui.SliderFloat("Voxel size (mm)", ref VoxelSize, 0.4f, 2.5f, "%.2f");
+        ImGui.SliderFloat("Twist", ref TwistTurns, 0.5f, 5.0f, "%.2f");
+        ImGui.SliderFloat("Voxel (mm)", ref VoxelSize, 0.4f, 2.5f, "%.2f");
 
         int chMode = (int)ChannelMode;
-        if (ImGui.Combo("Channel mode", ref chMode, "MeshBased v4\0Implicit v5\0Routed v5b\0"))
+        if (ImGui.Combo("Channels", ref chMode, "MeshBased v4\0Implicit v5\0Routed v5b\0"))
             ChannelMode = (ChannelMode)chMode;
-
-        ImGui.End();
     }
 
-    private void DrawBuildModePanel()
+    private void DrawBuildSection(PipelineController pipeline, int sceneStageCount)
     {
-        ImGui.SetNextWindowPos(new Vector2(12, 340), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSize(new Vector2(320, 140), ImGuiCond.FirstUseEver);
-        ImGui.Begin("Build Mode");
-
+        // Build mode
         int mode = (int)BuildMode;
-        ImGui.RadioButton("Atomic (one core voxelization)", ref mode, 0);
-        ImGui.RadioButton("Z-slice slabs (live progress)", ref mode, 1);
+        ImGui.RadioButton("Atomic", ref mode, 0);
+        ImGui.SameLine();
+        ImGui.RadioButton("Z-slice", ref mode, 1);
         BuildMode = (BuildMode)mode;
 
         if (BuildMode == BuildMode.ZSliceSlabs)
-        {
-            ImGui.SliderInt("Slab count", ref ZSliceCount, 8, 64);
-        }
+            ImGui.SliderInt("Slabs", ref ZSliceCount, 8, 64);
 
-        ImGui.TextDisabled("Z-slice = visible accumulation");
-        ImGui.TextDisabled("Atomic  = faster, single block");
-
-        ImGui.End();
-    }
-
-    private void DrawPipelinePanel(PipelineController pipeline, int sceneStageCount)
-    {
-        ImGui.SetNextWindowPos(new Vector2(12, 488), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSize(new Vector2(320, 240), ImGuiCond.FirstUseEver);
-        ImGui.Begin("Pipeline");
-
+        // Status
         string status = pipeline.IsRunning ? "BUILDING..." : (pipeline.StagesReceived > 0 ? "done" : "idle");
         if (pipeline.IsRunning)
             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.3f, 1f, 0.3f, 1f));
-        ImGui.TextUnformatted($"Status: {status}");
+        ImGui.TextUnformatted($"Status: {status}  ({pipeline.CurrentBuildElapsedSec:F1}s)  stages: {sceneStageCount}");
         if (pipeline.IsRunning)
             ImGui.PopStyleColor();
-
-        float elapsed = pipeline.CurrentBuildElapsedSec;
-        ImGui.TextUnformatted($"Elapsed:          {elapsed:F2}s");
-        ImGui.TextUnformatted($"Stages received:  {pipeline.StagesReceived}");
-        ImGui.TextUnformatted($"Stages on screen: {sceneStageCount}");
 
         if (pipeline.LastError != null)
         {
@@ -152,18 +203,16 @@ public sealed class ControlPanel
             ImGui.PopStyleColor();
         }
 
-        ImGui.Separator();
-
-        string label = pipeline.IsRunning ? "Cancel + Regenerate" : "Regenerate";
+        // Buttons
+        string label = pipeline.IsRunning ? "Cancel + Rebuild" : "Build Engine";
         if (ImGui.Button(label, new Vector2(160, 32)))
             RegenerateRequested = true;
-
         ImGui.SameLine();
-        if (ImGui.Button("Frame camera", new Vector2(120, 32)))
+        if (ImGui.Button("Frame", new Vector2(70, 32)))
             ResetCameraRequested = true;
-
-        ImGui.End();
     }
+
+    // Pipeline panel removed — build status integrated into DrawBuildSection (tabs).
 
     private void DrawLogPanel(PipelineController pipeline)
     {

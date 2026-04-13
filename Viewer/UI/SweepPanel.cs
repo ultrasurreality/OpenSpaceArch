@@ -60,15 +60,19 @@ public sealed class SweepPanel
         ImGui.SetNextWindowPos(new Vector2(1268, 600), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowSize(new Vector2(332, 296), ImGuiCond.FirstUseEver);
         ImGui.Begin("Design Space Sweep");
+        DrawContent();
+        ImGui.End();
+    }
 
+    /// <summary>Draws all sweep content without Begin/End — for embedding in another panel.</summary>
+    public void DrawContent()
+    {
         DrawHeader();
         DrawConfigBlock();
         DrawWeightsBlock();
         DrawStatsLine();
         DrawScatterPlot();
         DrawTopList();
-
-        ImGui.End();
     }
 
     // ─────────────────────────────────────────────────────────────

@@ -1,22 +1,18 @@
 // EngineBodyImplicit.cs — ONE SDF for the entire engine core
 //
-// Replaces the 9-voxel + boolean pipeline with a single IImplicit.
-// Chamber void + cooling channels + variable wall = ONE equation.
-// No voxel booleans. No OverOffset. No information loss.
+// v7 VOIDS-FIRST formula (2026-04-12):
+//   dVoid = min(dGas, dChShroud, dChSpike)   -- union ALL fluid voids
+//   solid = max(-dVoid, dVoid - wallT)        -- shell of wallT around union
 //
-// Formula (2026-04-09 fix):
-//   solid = max( shell(gas), -channels_clipped )
-//   where shell(gas) = max(-dGas, dGas - shellT)
-//         channels_clipped = each channel field clipped by min-wall from reference
+// Philosophy: geometry EMERGES from fluid voids + wall thickness.
+// No predetermined outer profile. No shellT estimation.
+// Channels are PART of the void union, not carved from a shell.
+// Wall wraps everything uniformly. Outer surface = consequence.
 //
-// Previous formula unioned channels INTO gas via min, then wrapped one shell
-// of thickness shellT around the union. That made each channel grow its own
-// shellT-radius material bubble, inflating the outer surface and hiding the
-// channel pattern — the engine looked fully solid. Fixed by building the
-// shell around gas ONLY, then boolean-subtracting channels from it.
-//
-// Insight source: design analysis (2026-04-01) — confirmed that
-// chamber wall + channels appear SIMULTANEOUSLY as ONE evaluated field.
+// This is the HelixHeatX pattern expressed as IImplicit:
+//   voxOuter = voxInner.voxOffset(wallT)
+//   voxSolid = voxOuter - voxInner
+// ...but evaluated analytically per-voxel without intermediate voxelization.
 
 using System.Numerics;
 using PicoGK;
@@ -31,13 +27,11 @@ public class EngineBodyImplicit : IImplicit
     readonly RevolutionSDF _shroud;
     readonly RevolutionSDF _spike;
 
-    // Cooling voids: each is (channel field, reference SDF, sign for "inside" vs "outside")
-    private readonly record struct CoolingVoid(IImplicit Field, IImplicit RefSdf, float Sign);
-    readonly List<CoolingVoid> _voids = new();
+    // Cooling channel fields (unioned into void, not subtracted from shell)
+    readonly List<IImplicit> _channelFields = new();
 
     // Pre-sampled z-dependent data
-    readonly float[] _wallT;     // inner wall thickness (Barlow)
-    readonly float[] _shellT;    // total shell thickness (wall + channels + outer)
+    readonly float[] _wallT;     // wall thickness (Barlow pressure formula)
     readonly int _nSamples;
     readonly float _zStart, _zEnd, _zStep;
 
@@ -56,49 +50,39 @@ public class EngineBodyImplicit : IImplicit
         _spike = spike;
 
         if (channelsShroud != null)
-            _voids.Add(new CoolingVoid(channelsShroud, shroud, +1f));   // outside shroud surface
+            _channelFields.Add(channelsShroud);
         if (channelsSpike != null)
-            _voids.Add(new CoolingVoid(channelsSpike, spike, -1f));     // inside spike surface
+            _channelFields.Add(channelsSpike);
 
-        // Pre-sample wall and shell thickness
+        // Pre-sample wall thickness (Barlow only — no shellT estimation)
         _zStart = S.zTip;
         _zEnd = S.zInjector + 5f;
         _nSamples = 2000;
         _zStep = (_zEnd - _zStart) / (_nSamples - 1);
         _wallT = new float[_nSamples];
-        _shellT = new float[_nSamples];
 
         for (int i = 0; i < _nSamples; i++)
         {
             float z = _zStart + i * _zStep;
-
-            // Inner wall from Barlow pressure formula
             float wall = HeatTransfer.WallThickness(S, z);
 
             // Structural reinforcement zones
             if (z > S.zInjector - 3f) wall *= 1.5f;
             if (z < S.zTip + 3f) wall *= 1.3f;
             wall = MathF.Max(wall, S.minPrintWall);
+            // Extra margin for smoothing erosion + outer wall coverage
+            wall += S.minPrintWall;
             _wallT[i] = wall;
-
-            // Shell = inner wall + channel depth + outer wall
-            float chDepth = 0f;
-            if (z >= S.zCowl && z <= S.zInjector)
-            {
-                var (_, hS) = HeatTransfer.ChannelRect(S, z);
-                var (_, hP) = HeatTransfer.ChannelRectSpike(S, z);
-                chDepth = MathF.Max(hS, hP);
-            }
-            _shellT[i] = wall + chDepth + S.minPrintWall + 0.5f;
         }
 
-        // Compute bounding box
+        // Compute bounding box — use channel extent, not analytical shellT
         float maxR = 0f;
         for (float z = _zStart; z <= _zEnd; z += 1f)
         {
             float rSh = ChamberSizing.ShroudProfile(S, z);
-            float shell = LerpShell(z);
-            maxR = MathF.Max(maxR, rSh + shell + 3f);
+            float wall = LerpWall(z);
+            var (_, hS) = HeatTransfer.ChannelRect(S, z);
+            maxR = MathF.Max(maxR, rSh + wall + hS + wall + 3f);
         }
         _bbox = new BBox3(
             new Vector3(-maxR, -maxR, _zStart - 2f),
@@ -115,48 +99,30 @@ public class EngineBodyImplicit : IImplicit
         return _wallT[i] + f * (_wallT[i + 1] - _wallT[i]);
     }
 
-    float LerpShell(float z)
-    {
-        float t = (z - _zStart) / _zStep;
-        int i = (int)t;
-        if (i < 0) return _shellT[0];
-        if (i >= _nSamples - 1) return _shellT[_nSamples - 1];
-        float f = t - i;
-        return _shellT[i] + f * (_shellT[i + 1] - _shellT[i]);
-    }
-
     public float fSignedDistance(in Vector3 v)
     {
-        // 1. Gas path = annular void between shroud (outer) and spike (inner).
-        //    Correct SDF of annulus A∩B where A = interior of shroud, B = exterior of spike:
-        //      A ∩ B  has  SDF = max(dShroud, -dSpike)
-        //    (negative INSIDE gas, positive outside — standard SDF convention).
+        // VOIDS-FIRST: union all fluid voids, wrap wallT around the union.
+        //
+        // 1. Gas path = annular void (negative inside gas)
         float dShroud = _shroud.fSignedDistance(v);
         float dSpike  = _spike.fSignedDistance(v);
         float dGas    = MathF.Max(dShroud, -dSpike);
 
-        float wallT  = LerpWall(v.Z);
-        float shellT = LerpShell(v.Z);
-
-        // 2. Main shell: material band of thickness shellT around gas ONLY.
-        //    Standard shell-around-void formula: solid iff 0 ≤ dGas ≤ shellT.
-        //    Produces two shells — one outside shroud, one inside spike.
-        //    Channels are not unioned with gas — they are subtracted below.
-        float solid = MathF.Max(-dGas, dGas - shellT);
-
-        // 3. Subtract cooling channels from shell (boolean subtract on SDF).
-        //    Each channel is clipped by `wallT - dRef` so it stays at least
-        //    wallT away from its reference surface (shroud outside, spike inside).
-        for (int i = 0; i < _voids.Count; i++)
+        // 2. Union gas with channel voids, WITH mutual exclusion.
+        //    Each channel is clipped so it can't be closer than wallT to gas.
+        //    This is HelixHeatX's voxHot -= voxCold.voxOffset(minWall) as IImplicit.
+        float wallT = LerpWall(v.Z);
+        float dVoid = dGas;
+        for (int i = 0; i < _channelFields.Count; i++)
         {
-            var cv = _voids[i];
-            float dRef  = cv.RefSdf.fSignedDistance(v) * cv.Sign;
-            float dCh   = cv.Field.fSignedDistance(v);
-            float dGood = MathF.Max(dCh, wallT - dRef);
-            solid = MathF.Max(solid, -dGood);
+            float dCh = _channelFields[i].fSignedDistance(v);
+            float dChClipped = MathF.Max(dCh, wallT - dGas); // mutual exclusion
+            dVoid = MathF.Min(dVoid, dChClipped);
         }
 
-        return solid;
+        // 3. Shell: solid where 0 < dVoid < wallT
+        //    Outer surface = consequence of void geometry + wall thickness.
+        return MathF.Max(-dVoid, dVoid - wallT);
     }
 
     public BBox3 GetBBox() => _bbox;

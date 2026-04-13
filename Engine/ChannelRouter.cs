@@ -41,17 +41,14 @@ public static class ChannelRouter
     /// Route shroud cooling channels on the outer surface of the chamber.
     /// Uses ANALYTICAL helical path on the revolution body — no turtle walk, no voxel
     /// discretization artifacts. Each channel gets individual phi_i and twistRate_i.
-    public static ChannelRouteResult RouteShroudChannels(AeroSpec S, Voxels voxChamber)
+    public static ChannelRouteResult RouteShroudChannels(AeroSpec S)
     {
         Library.Log("  Routing shroud channels (analytical)...");
-
-        float avgWall = HeatTransfer.WallThickness(S, S.zThroat);
-        float avgHalfH = 1.5f;
 
         int nChannels = S.nChannelsShroud;
         float twistTotal = S.channelTwistTurns * 2f * MathF.PI;
         float zStart = S.zCowl + 3f;
-        float zEnd = S.zInjector - 3f;
+        float zEnd = S.zChTop;  // v7: stop at chamber top, not injector (dome has no room for channels)
         float globalTwistRate = twistTotal / (zEnd - zStart);
         float stepSize = 3.0f;
 
@@ -69,7 +66,11 @@ public static class ChannelRouter
 
             var path = BuildAnalyticalHelix(
                 phiBase, twistRate_i, zStart, zEnd, stepSize,
-                z => ChamberSizing.ShroudProfile(S, z) + avgWall + avgHalfH);
+                z => {
+                    float wall = HeatTransfer.WallThickness(S, z);
+                    var (_, h) = HeatTransfer.ChannelRect(S, z);
+                    return ChamberSizing.ShroudProfile(S, z) + wall + h / 2f;
+                });
 
             if (path.Count >= 3)
             {
@@ -85,17 +86,14 @@ public static class ChannelRouter
     }
 
     /// Route spike cooling channels on the inner surface of the spike (analytical).
-    public static ChannelRouteResult RouteSpikeChannels(AeroSpec S, Voxels voxChamber)
+    public static ChannelRouteResult RouteSpikeChannels(AeroSpec S)
     {
         Library.Log("  Routing spike channels (analytical)...");
-
-        float avgWall = HeatTransfer.WallThickness(S, S.zThroat);
-        float avgHalfH = 1.0f;
 
         int nChannels = S.nChannelsSpike;
         float twistTotal = 1.0f * 2f * MathF.PI; // 1 turn for spike
         float zStart = S.zCowl + 3f;
-        float zEnd = S.zInjector - 3f;
+        float zEnd = S.zChTop;  // v7: stop at chamber top
         float globalTwistRate = twistTotal / (zEnd - zStart);
         float stepSize = 1.5f;
 
@@ -115,14 +113,20 @@ public static class ChannelRouter
 
             // Spike channels live INSIDE the spike (negative offset).
             // Skip if radius would be too small (tip region).
-            float rCheck = ChamberSizing.SpikeProfile(S, zStart) - avgWall - avgHalfH;
-            if (rCheck < 2f) continue;
+            {
+                float wallCheck = HeatTransfer.WallThickness(S, zStart);
+                var (_, hCheck) = HeatTransfer.ChannelRectSpike(S, zStart);
+                float rCheck = ChamberSizing.SpikeProfile(S, zStart) - wallCheck - hCheck / 2f;
+                if (rCheck < 2f) continue;
+            }
 
             var path = BuildAnalyticalHelix(
                 phiBase, twistRate_i, zStart, zEnd, stepSize,
                 z =>
                 {
-                    float rInner = ChamberSizing.SpikeProfile(S, z) - avgWall - avgHalfH;
+                    float wall = HeatTransfer.WallThickness(S, z);
+                    var (_, h) = HeatTransfer.ChannelRectSpike(S, z);
+                    float rInner = ChamberSizing.SpikeProfile(S, z) - wall - h / 2f;
                     return MathF.Max(rInner, 0.5f);
                 });
 

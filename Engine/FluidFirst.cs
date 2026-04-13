@@ -56,22 +56,14 @@ public static class FluidFirst
 
         if (S.channelMode == ChannelMode.Routed_v5b)
         {
-            float bboxR = S.rShroudChamber + 15f;
-            BBox3 routeBBox = new(
-                new(-bboxR, -bboxR, S.zTip - 5f),
-                new(bboxR, bboxR, S.zInjector + 5f));
-            Voxels voxShroudRoute = new Voxels(shroudSDF, routeBBox);
-
-            var routeS = ChannelRouter.RouteShroudChannels(S, voxShroudRoute);
+            // v7: routing is purely analytical — no temp voxelization needed
+            var routeS = ChannelRouter.RouteShroudChannels(S);
             chShroud = new RoutedChannelFieldImplicit(S, routeS, isShroud: true);
 
-            var routeP = ChannelRouter.RouteSpikeChannels(S, voxShroudRoute);
+            var routeP = ChannelRouter.RouteSpikeChannels(S);
             chSpike = routeP.Spines.Count > 0
                 ? new RoutedChannelFieldImplicit(S, routeP, isShroud: false)
                 : new ChannelFieldImplicit(S, isShroud: false);
-
-            voxShroudRoute = null!;
-            GC.Collect();
         }
         else
         {
@@ -190,27 +182,19 @@ public static class FluidFirst
 
         if (S.channelMode == ChannelMode.Routed_v5b)
         {
-            // Turtle walk needs voxels for bClosestPointOnSurface — temporary only
-            Library.Log("  Routing: creating temp surface for turtle walk...");
-            float bboxR = S.rShroudChamber + 15f;
-            BBox3 routeBBox = new(
-                new(-bboxR, -bboxR, S.zTip - 5f),
-                new( bboxR,  bboxR, S.zInjector + 5f));
-            Voxels voxShroudRoute = new Voxels(shroudSDF, routeBBox);
+            // v7: routing is purely analytical — no temp voxelization
+            Library.Log("  Routing: analytical helical paths...");
 
-            var routeS = ChannelRouter.RouteShroudChannels(S, voxShroudRoute);
+            var routeS = ChannelRouter.RouteShroudChannels(S);
             chShroud = new RoutedChannelFieldImplicit(S, routeS, isShroud: true);
             Library.Log($"  Shroud: {routeS.Spines.Count} routed channels.");
 
-            var routeP = ChannelRouter.RouteSpikeChannels(S, voxShroudRoute);
+            var routeP = ChannelRouter.RouteSpikeChannels(S);
             if (routeP.Spines.Count > 0)
                 chSpike = new RoutedChannelFieldImplicit(S, routeP, isShroud: false);
             else
                 chSpike = new ChannelFieldImplicit(S, isShroud: false);
             Library.Log($"  Spike: {routeP.Spines.Count} routed channels (fallback: implicit).");
-
-            voxShroudRoute = null!;
-            GC.Collect();
         }
         else
         {
@@ -359,36 +343,50 @@ public static class FluidFirst
         float rPort = S.feedPortRadius;
         float portLen = S.feedPortLength;
 
-        // Fuel port — slight taper
-        float zFuel = S.zCowl + 3f;
+        // v7: port positions are DERIVED (computed in HeatTransfer.DerivePortPositions),
+        // not hardcoded. Port = consequence of channel geometry, not user input.
+
+        // Fuel port — at derived position
+        float zFuel = S.fuelPortZ;
+        float phiFuel = S.fuelPortPhi;
         float rSh = ChamberSizing.ShroudProfile(S, zFuel);
         if (rSh < 2f) rSh = S.rShroudThroat;
         float wallF = HeatTransfer.WallThickness(S, zFuel);
         float rStart = rSh + wallF;
+        float cfuel = MathF.Cos(phiFuel);
+        float sfuel = MathF.Sin(phiFuel);
         lat.AddBeam(
-            new Vector3(rStart, 0, zFuel), rPort * 1.15f,
-            new Vector3(rStart + portLen, 0, zFuel), rPort);
+            new Vector3(rStart * cfuel, rStart * sfuel, zFuel), rPort * 1.15f,
+            new Vector3((rStart + portLen) * cfuel, (rStart + portLen) * sfuel, zFuel), rPort);
 
-        // LOX port — opposite side, near injector
-        float zLox = S.zInjector - 5f;
+        // LOX port — at derived position
+        float zLox = S.loxPortZ;
+        float phiLox = S.loxPortPhi;
         float rShTop = ChamberSizing.ShroudProfile(S, zLox);
         if (rShTop < 2f) rShTop = S.rShroudChamber;
         float wallL = HeatTransfer.WallThickness(S, zLox);
         float rStartL = rShTop + wallL;
+        float clox = MathF.Cos(phiLox);
+        float slox = MathF.Sin(phiLox);
         lat.AddBeam(
-            new Vector3(-rStartL, 0, zLox), rPort * 1.15f,
-            new Vector3(-rStartL - portLen, 0, zLox), rPort);
+            new Vector3(rStartL * clox, rStartL * slox, zLox), rPort * 1.15f,
+            new Vector3((rStartL + portLen) * clox, (rStartL + portLen) * slox, zLox), rPort);
 
-        // Igniter port — angled entry at 90°
-        float zIgn = S.zChBot + (S.zChTop - S.zChBot) * 0.3f;
+        // Igniter port — angled entry at derived position
+        float zIgn = S.igniterPortZ;
+        float phiIgn = S.igniterPortPhi;
         float rShIgn = ChamberSizing.ShroudProfile(S, zIgn);
         if (rShIgn < 2f) rShIgn = S.rShroudChamber;
         float wallI = HeatTransfer.WallThickness(S, zIgn);
         float rIgnStart = rShIgn + wallI;
+        float cign = MathF.Cos(phiIgn);
+        float sign = MathF.Sin(phiIgn);
         float ignLen = 6f;
         lat.AddBeam(
-            new Vector3(0, rIgnStart, zIgn), 1.2f,
-            new Vector3(0, rIgnStart + ignLen * 0.87f, zIgn + ignLen * 0.5f), 1.0f);
+            new Vector3(rIgnStart * cign, rIgnStart * sign, zIgn), 1.2f,
+            new Vector3((rIgnStart + ignLen * 0.87f) * cign,
+                        (rIgnStart + ignLen * 0.87f) * sign,
+                        zIgn + ignLen * 0.5f), 1.0f);
 
         return new Voxels(lat);
     }

@@ -24,6 +24,15 @@ public sealed class GpuMesh : IDisposable
         int nVerts = mesh.nVertexCount();
         int nTris = mesh.nTriangleCount();
 
+        // Guard: empty mesh (e.g. Z-slice slab with no geometry)
+        if (nVerts == 0 || nTris == 0)
+        {
+            IndexCount = 0;
+            Bounds = new BoundingSphere(Vector3.Zero, 0f);
+            _vao = _vbo = _ebo = 0;
+            return;
+        }
+
         // Compute vertex normals by averaging face normals
         var positions = new Vector3[nVerts];
         var normals = new Vector3[nVerts];

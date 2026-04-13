@@ -162,6 +162,19 @@ public class AeroSpec
     public int   nChannelsSpike;   // computed from spike throat geometry
 
     // ============================================================
+    // COMPUTED — Step 3c: Derived Port Positions
+    // v7: ports are OUTPUT, not INPUT. Positions derived from
+    // chamber geometry + channel endpoints. Not user-specified.
+    // ============================================================
+
+    public float fuelPortZ;         // mm — axial position of fuel inlet
+    public float fuelPortPhi;       // rad — azimuthal angle (0° = +X)
+    public float loxPortZ;          // mm — axial position of LOX inlet
+    public float loxPortPhi;        // rad — azimuthal angle (180° = -X)
+    public float igniterPortZ;      // mm — axial position of igniter
+    public float igniterPortPhi;    // rad — azimuthal angle (90° = +Y)
+
+    // ============================================================
     // METHODS
     // ============================================================
 

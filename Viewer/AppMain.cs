@@ -139,9 +139,10 @@ public static class AppMain
         _constraintsPanel = new ConstraintsPanel();
         _sweepPanel = new SweepPanel
         {
-            // Apply winner → push to ControlPanel sliders → auto regenerate.
             OnApplyWinner = spec => _controlPanel.ApplyFromSpec(spec)
         };
+        // v7: embed sweep panel into ControlPanel's Search tab
+        _controlPanel.SweepPanel = _sweepPanel;
 
         _renderer.Camera.Target = new Vector3(0, 0, 100f);
         _renderer.Camera.Distance = 500f;
@@ -198,7 +199,8 @@ public static class AppMain
     {
         if (_profiles == null) return;
 
-        int hash = HashCode.Combine(spec.F_thrust, spec.Pc, spec.OF_ratio, spec.voxelSize, (int)spec.channelMode);
+        int hash = HashCode.Combine(spec.F_thrust, spec.Pc, spec.OF_ratio, spec.voxelSize,
+            (int)spec.channelMode, spec.CR, spec.Lstar, spec.SF);
         if (!force && hash == _previewParamHash) return;
         _previewParamHash = hash;
 
@@ -207,6 +209,7 @@ public static class AppMain
             Thermochemistry.Compute(spec);
             ChamberSizing.Compute(spec);
             HeatTransfer.Compute(spec);
+            HeatTransfer.DerivePortPositions(spec);
             _profiles.Upload(spec);
             _previewSpec = spec;
 
@@ -268,6 +271,7 @@ public static class AppMain
                 Thermochemistry.Compute(_lastBuiltSpec);
                 ChamberSizing.Compute(_lastBuiltSpec);
                 HeatTransfer.Compute(_lastBuiltSpec);
+                HeatTransfer.DerivePortPositions(_lastBuiltSpec);
 
                 _flow.Compute(_lastBuiltSpec);
                 _heatProfile?.Upload(_lastBuiltSpec, _flow);
@@ -342,10 +346,7 @@ public static class AppMain
 
         _controlPanel.Draw(_pipeline, _renderer, _sceneStageCount, _lastBuiltSpec, _startup, _viability);
         _constraintsPanel.Draw(_liveViability);
-        // Phase 2: keep sweep thrust/voxel in sync with whatever the user
-        // is currently targeting via ControlPanel, then draw the panel.
-        _sweepPanel.SyncPinnedInputs(_controlPanel.Thrust, _controlPanel.VoxelSize);
-        _sweepPanel.Draw();
+        // SweepPanel is now drawn inside ControlPanel's Search tab (v7)
         _imgui?.Render();
     }
 

@@ -49,6 +49,7 @@ class Program
         Thermochemistry.Compute(spec);
         ChamberSizing.Compute(spec);
         HeatTransfer.Compute(spec);
+        HeatTransfer.DerivePortPositions(spec);
         Console.WriteLine($"\nThrust: {spec.F_thrust/1000:F1} kN");
         Console.WriteLine($"Isp: {spec.Isp_SL:F1} s (SL), {spec.Isp_vac:F1} s (vac)");
         Console.WriteLine($"Mass flow: {spec.mDot:F3} kg/s");
@@ -72,10 +73,25 @@ class Program
             Thermochemistry.Compute(spec);
             ChamberSizing.Compute(spec);
             HeatTransfer.Compute(spec);
+            HeatTransfer.DerivePortPositions(spec);
             spec.LogSummary();
 
             // ── STEP 4-8: Geometry emerges from physics ──
             Voxels voxEngine = EngineAssembly.Build(spec);
+
+            // ── STEP 9: Measure reality vs formulas ──
+            Library.Log("");
+            Library.Log("── POST-BUILD MEASUREMENT (voxels, not formulas) ──");
+            var shroudSDF = new RevolutionSDF(
+                z => ChamberSizing.ShroudProfile(spec, z), spec.zCowl, spec.zInjector);
+            var spikeSDF = new RevolutionSDF(
+                z => ChamberSizing.SpikeProfile(spec, z), spec.zTip, spec.zInjector);
+            var chShroud = new RoutedChannelFieldImplicit(spec,
+                ChannelRouter.RouteShroudChannels(spec), isShroud: true);
+
+            var fields = new PhysicsFields();
+            fields.MeasureWallThickness(spec, voxEngine, chShroud);
+            fields.MeasureOverhang(spec, voxEngine);
 
             // ── VERIFICATION ──
             Verify(voxEngine, spec);

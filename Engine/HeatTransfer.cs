@@ -153,6 +153,23 @@ public static class HeatTransfer
             Library.Log($"  Self-iteration adjusted velocity: {origVMax:F1} → {S.v_cool_max:F1} m/s");
     }
 
+    /// Derive port positions from chamber geometry (v7: ports are OUTPUT).
+    /// Called after Compute() so z-stations are available.
+    public static void DerivePortPositions(AeroSpec S)
+    {
+        // Fuel inlet — near cowl (cold CH4 enters at bottom of shroud channels)
+        S.fuelPortZ   = S.zCowl + 3f;
+        S.fuelPortPhi = 0f;                  // 0° = +X axis
+
+        // LOX inlet — near injector (LOX enters at top, feeds spike channels)
+        S.loxPortZ   = S.zInjector - 5f;
+        S.loxPortPhi = MathF.PI;             // 180° = -X axis
+
+        // Igniter — 30% up the chamber from bottom
+        S.igniterPortZ   = S.zChBot + (S.zChTop - S.zChBot) * 0.3f;
+        S.igniterPortPhi = MathF.PI / 2f;    // 90° = +Y axis
+    }
+
     /// Heat flux q(z) at any axial station (W/m²)
     public static float HeatFlux(AeroSpec S, float z)
     {

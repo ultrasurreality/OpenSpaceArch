@@ -83,7 +83,8 @@ public sealed class PipelineController
                 Thermochemistry.Compute(spec);
                 ChamberSizing.Compute(spec);
                 HeatTransfer.Compute(spec);
-                LogLine($"  [physics] {physTimer.Elapsed.TotalSeconds:F2}s (thermo + sizing + heat transfer)");
+                HeatTransfer.DerivePortPositions(spec);
+                LogLine($"  [physics] {physTimer.Elapsed.TotalSeconds:F2}s (thermo + sizing + heat transfer + ports)");
 
                 FluidFirst.Build(spec, stage =>
                 {

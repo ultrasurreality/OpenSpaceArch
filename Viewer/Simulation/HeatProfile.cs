@@ -1,11 +1,14 @@
-// HeatProfile.cs — builds a 1D float texture of wall temperature T_wall(z) [K]
-// and heat flux q(z) [W/m²] from the already-computed AeroSpec + HeatTransfer state.
+// HeatProfile.cs — builds a 1D float texture of gas static temperature T_gas(z) [K]
+// (for display) and heat flux q(z) [W/m²] from the already-computed AeroSpec +
+// HeatTransfer state.
 //
 // The engine_running.frag shader samples this texture using the vertex's world Z
 // (remapped to [0..1] across the engine length) and colors the wall accordingly.
+// Note: the R channel is the gas STATIC temperature, not the gas-side wall
+// temperature — it is used purely as a display ramp, not as a thermal result.
 //
 // Texture layout: RG32F, width = 256 samples
-//   R channel = normalized temperature [0..1] (Tc wall ≈ 1.0, ambient ≈ 0.0)
+//   R channel = normalized gas static temperature [0..1] (Tc ≈ 1.0, ambient ≈ 0.0)
 //   G channel = normalized heat flux [0..1] (throat peak ≈ 1.0)
 
 using OpenSpaceArch.Engine;
@@ -20,7 +23,6 @@ public sealed class HeatProfile : IDisposable
     public int Width { get; }
     public float Zmin { get; private set; }
     public float Zmax { get; private set; }
-    public float Twall_K { get; private set; }
     public float QmaxWm2 { get; private set; }
 
     public HeatProfile(GL gl, int width = 256)
@@ -35,15 +37,15 @@ public sealed class HeatProfile : IDisposable
     }
 
     /// <summary>
-    /// Builds a physically-grounded (T(z), q(z)) texture from the real Bartz
-    /// heat flux of the current spec. T(z) follows the isentropic flow profile
-    /// from GasFlowProfile. q(z) comes from HeatTransfer.HeatFlux(S, z) directly.
+    /// Builds a (T_gas(z), q(z)) texture from the real Bartz heat flux of the
+    /// current spec. T_gas(z) is the gas static temperature from the isentropic
+    /// flow profile (GasFlowProfile), used as a display ramp — it is NOT a wall
+    /// temperature. q(z) comes from HeatTransfer.HeatFlux(S, z) directly.
     /// </summary>
     public unsafe void Upload(AeroSpec S, GasFlowProfile flow)
     {
         Zmin = S.zTip;
         Zmax = S.zInjector + 5f;
-        Twall_K = 800f;
 
         float[] data = new float[Width * 2];
         float qPeak = 0f;
@@ -65,9 +67,10 @@ public sealed class HeatProfile : IDisposable
             else
                 tempK = flow.TempAt(z);
 
-            // Wall temperature heuristic: gas-side wall sits ~T_aw - film,
-            // approx 30-40% between ambient and gas static at this station.
-            // For display we use gas static temp normalized into the heat ramp.
+            // Display ramp: normalize the gas STATIC temperature at this station
+            // into [0..1]. This is not a wall temperature — the gas-side wall
+            // would sit well below T_gas due to film cooling — it is only used
+            // to color the wall for the running-engine visualization.
             float tempNorm = (tempK - Tamb) / MathF.Max(1f, Tmax - Tamb);
             tRaw[i] = tempNorm;
 

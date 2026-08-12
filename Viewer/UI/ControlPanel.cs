@@ -13,7 +13,19 @@ public sealed class ControlPanel
 {
     // ── Boundary conditions (mission spec + printer) ──
     public float Thrust = 5000f;          // N — mission
-    public float VoxelSize = 1.0f;        // mm — printer resolution
+    // VoxelSize is the INTERACTIVE PREVIEW/BUILD resolution driven from this panel.
+    // It is deliberately distinct from the two other voxel defaults in the codebase:
+    //   • AeroSpec.voxelSize = 0.4 mm  — headless/batch STL generation (G4's file, fits ~5 GB RAM)
+    //   • AppMain.Run() InitHeadless(0.5 mm) — the PicoGK core grid the viewer runs on
+    // These three are intentionally NOT forced equal (preview vs build trade resolution
+    // for responsiveness). Lowered 1.0 → 0.5 mm to (a) match the 0.5 mm core grid AppMain
+    // initialises, and (b) keep clear of EngineValidator's C12 boundary (voxel < throatGap/2).
+    // For the default 5 kN/110 bar engine throatGap ≈ 3.1 mm, so throatGap/2 ≈ 1.53 mm:
+    // 1.0 mm voxel still PASSES C12 (≈3 voxels across the annulus) but that is the bare
+    // 2-voxel minimum and risks the thin-annulus non-watertight failure mode; 0.5 mm gives
+    // ≈6 voxels across the throat gap — safe headroom and far from the C12 limit. The 5 kN
+    // throat never *fails* C12 anywhere on the Pc slider (gap/2 ≥ 1.11 mm even at 200 bar).
+    public float VoxelSize = 0.5f;        // mm — interactive preview/build resolution
     public ChannelMode ChannelMode = ChannelMode.Routed_v5b;
     public float MinWall = 0.5f;          // mm — LPBF min wall
     public float MaxOverhang = 45f;       // degrees — LPBF max overhang
@@ -138,6 +150,8 @@ public sealed class ControlPanel
         ImGui.SliderFloat("Voxel (mm)", ref VoxelSize, 0.4f, 2.5f, "%.2f");
 
         ImGui.Spacing();
+        // Combo item order MUST match enum ChannelMode { MeshBased_v4=0, Implicit_v5=1, Routed_v5b=2 }
+        // (AeroSpec.cs). The cast (ChannelMode)chMode relies on this 1:1 index mapping. Verified in sync.
         int chMode = (int)ChannelMode;
         if (ImGui.Combo("Channels", ref chMode, "MeshBased v4\0Implicit v5\0Routed v5b\0"))
             ChannelMode = (ChannelMode)chMode;
@@ -172,6 +186,8 @@ public sealed class ControlPanel
         ImGui.SliderFloat("Twist", ref TwistTurns, 0.5f, 5.0f, "%.2f");
         ImGui.SliderFloat("Voxel (mm)", ref VoxelSize, 0.4f, 2.5f, "%.2f");
 
+        // Same enum-order contract as the Mission tab Combo:
+        // "MeshBased v4\0Implicit v5\0Routed v5b\0" == ChannelMode (0,1,2). Keep in sync.
         int chMode = (int)ChannelMode;
         if (ImGui.Combo("Channels", ref chMode, "MeshBased v4\0Implicit v5\0Routed v5b\0"))
             ChannelMode = (ChannelMode)chMode;

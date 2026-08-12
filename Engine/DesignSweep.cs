@@ -7,6 +7,7 @@
 // Или из кода: DesignSweep.Run()
 
 using System.Diagnostics;
+using OpenSpaceArch.Engine.CSP;
 
 namespace OpenSpaceArch.Engine;
 
@@ -37,62 +38,19 @@ public static class DesignSweep
         string Errors        // что не так
     );
 
-    // Weighted composite scoring (PicoGK-Nozzle pattern)
-    // Each metric normalized to 0-1, then weighted. Penalties subtract.
-    static float ComputeScore(AeroSpec S, float sigma_th_MPa, int spatialConflicts)
-    {
-        float score = 0f;
+    // Default scoring preset for the grid sweep. The grid sweep is fixed-weight
+    // (no live sliders), so it uses the same default constants the Phase 2
+    // SweepPanel ships with — kept as one shared instance to avoid allocating
+    // per variant inside the 8640-iteration loop.
+    static readonly ScoringWeights _gridWeights = ScoringWeights.Default();
 
-        // ── Positive objectives (weights sum to 1.0) ──
-
-        // Isp: higher = better. Normalize: 250s=0, 350s=1
-        float ispNorm = Math.Clamp((S.Isp_SL - 250f) / 100f, 0f, 1f);
-        score += 0.30f * ispNorm;
-
-        // T/W: higher = better. Normalize via mass estimate
-        float rOuter = S.rShroudChamber + 3f;
-        float vol = MathF.PI * rOuter * rOuter * S.zTotal;
-        float massKg = vol * 1e-9f * S.rho * 0.35f;
-        float tw = S.F_thrust / (massKg * 9.81f);
-        float twNorm = Math.Clamp((tw - 50f) / 450f, 0f, 1f); // 50=0, 500=1
-        score += 0.20f * twNorm;
-
-        // Thermal margin: σ_thermal far below yield = good
-        float sigmaRatio = sigma_th_MPa / (S.sigma_yield / 1e6f);
-        float thermalMargin = Math.Clamp(1f - sigmaRatio, 0f, 1f); // 1=no stress, 0=at yield
-        score += 0.25f * thermalMargin;
-
-        // Channel fit: channels easily fit in circumference = good
-        float circThroat = 2f * MathF.PI * (S.rShroudThroat + 2f);
-        float neededThroat = S.nChannelsShroud * (S.chRadiusMin * 2f + S.minRibWall);
-        float fitRatio = Math.Clamp(circThroat / MathF.Max(neededThroat, 1f), 0f, 2f) / 2f;
-        score += 0.15f * fitRatio;
-
-        // Compactness: shorter engine = better (lighter structure, less material)
-        float lengthNorm = Math.Clamp(1f - (S.zTotal - 80f) / 200f, 0f, 1f); // 80mm=1, 280mm=0
-        score += 0.10f * lengthNorm;
-
-        // ── Penalties (subtractive) ──
-
-        // Thermal stress above yield: -0.1 per 100 MPa over
-        if (sigma_th_MPa > S.sigma_yield / 1e6f)
-        {
-            float over = (sigma_th_MPa - S.sigma_yield / 1e6f) / 100f;
-            score -= 0.10f * over;
-        }
-
-        // Spatial conflicts: -0.02 per conflict
-        score -= 0.02f * spatialConflicts;
-
-        // Throat gap too small: hard penalty
-        float gap = S.rShroudThroat - S.rSpikeThroat;
-        if (gap < 1.5f) score -= 0.3f;
-
-        // Coolant velocity unreasonable
-        if (S.v_cool_max > 50f) score -= 0.1f;
-
-        return Math.Clamp(score, 0f, 1f);
-    }
+    // Weighted composite scoring (PicoGK-Nozzle pattern).
+    // Delegates to the single shared formula in EngineEvaluation so the grid
+    // sweep, the outer random sweep, and SweepResult never drift apart. With
+    // the default weights this is numerically identical to the old hardcoded
+    // 0.30/0.20/0.25/0.15/0.10 objectives and 0.10/0.02/0.30/0.10 penalties.
+    static float ComputeScore(AeroSpec S, float sigma_th_MPa, int spatialConflicts) =>
+        EngineEvaluation.Score(_gridWeights, S, sigma_th_MPa, spatialConflicts);
 
     // Валидация одного варианта
     static DesignResult Evaluate(float thrust, float pc_bar, float of_ratio, float sf, float twist, float cr)
@@ -124,52 +82,20 @@ public static class DesignSweep
         }
 
         // ── Проверки ──
+        // Термический стресс (warning only — print-time laser
+        // modulation). НЕ блокируем — это ограничение материала, не геометрии.
+        float sigma_th_MPa = EngineEvaluation.ThermalStressMPa(S);
 
-        // 1. Термический стресс (warning only — print-time laser modulation addresses it)
-        float deltaT = S.qThroat * (S.wallThroat / 1000f) / S.k_wall;
-        float sigma_th = S.E_mod * S.alpha_CTE * deltaT / (1f - S.nu_poisson);
-        float sigma_th_MPa = sigma_th / 1e6f;
-        // НЕ блокируем — это ограничение материала, не геометрии
-
-        // 2. Канал уже минимума для удаления порошка
-        if (S.chRadiusMin * 2 < S.minChannel)
-            errors.Add($"ch_dia={S.chRadiusMin*2:F2}<{S.minChannel}mm");
-
-        // 3. Self-iteration не сошлась (скорость ушла слишком высоко)
-        if (S.v_cool_max > 50f)
-            errors.Add($"v_cool={S.v_cool_max:F0}>50m/s");
-
-        // 4. Стенка тоньше минимума печати (не должно быть, но проверим)
-        if (S.wallThroat < S.minPrintWall)
-            errors.Add($"wall={S.wallThroat:F2}<{S.minPrintWall}mm");
-
-        // 5. Throat gap слишком маленький для печати
-        float throatGap = S.rShroudThroat - S.rSpikeThroat;
-        if (throatGap < 1.5f)
-            errors.Add($"gap={throatGap:F1}<1.5mm");
-
-        // 6. Тепловой поток нереально высокий
-        if (S.qThroat / 1e6f > 100f)
-            errors.Add($"q={S.qThroat/1e6:F0}MW/m²");
-
-        // 7. Пространственная валидация
-        var spatialConflicts = SpatialValidator.Validate(S);
-        if (spatialConflicts.Count > 0)
-        {
-            var groups = spatialConflicts.GroupBy(c => $"{c.ElementA}v{c.ElementB}");
-            foreach (var g in groups)
-                errors.Add($"{g.Key}:{g.Count()}");
-        }
+        // Все геометрические / производственные предикаты — общий хелпер
+        // (тот же набор, что использует outer sweep).
+        errors.AddRange(EngineEvaluation.RunValidityChecks(S, out int spatialConflicts));
 
         // Грубая оценка массы (цилиндр с каналами, без вокселей)
-        float rOuter = S.rShroudChamber + 3f; // mm, примерно
-        float vol_mm3 = MathF.PI * rOuter * rOuter * S.zTotal; // грубый цилиндр
-        float fillFactor = 0.35f; // ~35% заполнения (каналы, пустоты)
-        float massKg = vol_mm3 * 1e-9f * S.rho * fillFactor;
-        float tw = thrust / (massKg * 9.81f);
+        float massKg = EngineEvaluation.MassEstimateKg(S);
+        float tw     = EngineEvaluation.TWRatio(S, massKg);
 
         // Composite score
-        float score = ComputeScore(S, sigma_th_MPa, spatialConflicts.Count);
+        float score = ComputeScore(S, sigma_th_MPa, spatialConflicts);
 
         return new DesignResult(
             Thrust: thrust,
@@ -205,6 +131,12 @@ public static class DesignSweep
         float Pa_SL = 101325f;
 
         var (Tc, gamma, MW, cStar) = Thermochemistry.InterpolateCEA(S.OF_ratio);
+        // First-order chamber-pressure correction (dissociation suppression).
+        // MUST match Thermochemistry.Compute — without it the sweep would rank
+        // designs on uncorrected 50-bar chemistry while the single build uses
+        // corrected chemistry, so the two authoritative physics paths disagree
+        // for Pc != Pc_cal (the sweep samples Pc over 50–150 bar). No-op at 50 bar.
+        (Tc, gamma, MW, cStar) = Thermochemistry.ApplyPressureCorrection(S.Pc, Tc, gamma, MW, cStar);
         S.Tc = Tc;
         S.gamma = gamma;
         S.molWeight = MW;
@@ -424,22 +356,140 @@ public static class DesignSweep
                 $"{r.wallThroat,5:F2} {r.nChannels,3:F0} {(r.IsValid ? "OK" : "warn"),-12}");
         }
 
-        // Pareto front: best Score per thrust
-        Console.WriteLine($"\n── Pareto front: best Score per thrust ──\n");
+        // Best Score per thrust bucket — NOT a Pareto front, just the single
+        // top-scored variant at each thrust level. Useful as a "one engine per
+        // size class" shortlist, but it collapses the multi-objective trade-off
+        // into the scalar Score. The real trade-off surface is printed below.
+        Console.WriteLine($"\n── Best Score per thrust bucket ──\n");
         Console.WriteLine(
             $"{"Score",6} {"F(N)",7} {"Pc",4} {"O/F",4} {"SF",4} {"CR",4} " +
             $"{"Isp",5} {"T/W",5} {"σ_th",5}");
         Console.WriteLine(new string('─', 70));
 
-        var pareto = allSorted
-            .GroupBy(r => r.Thrust)
-            .Select(g => g.OrderByDescending(r => r.Score).First())
-            .OrderBy(r => r.Thrust);
-        foreach (var r in pareto)
+        var perThrustBest = BestScorePerThrust(allSorted);
+        foreach (var r in perThrustBest)
         {
             Console.WriteLine(
                 $"{r.Score,6:F3} {r.Thrust,7:F0} {r.Pc_bar,4:F0} {r.OF,4:F1} {r.SF,4:F1} {r.CR,4:F1} " +
                 $"{r.Isp_SL,5:F0} {r.TWRatio,5:F0} {r.sigma_thermal,5:F0}");
         }
+
+        // REAL Pareto front over (max Isp, min mass, min thermal stress).
+        // These are the genuinely non-dominated designs: no other variant beats
+        // any one of them on all three objectives simultaneously.
+        var pareto = ParetoFront(allSorted);
+        Console.WriteLine(
+            $"\n── Pareto front (max Isp · min mass · min σ_th): " +
+            $"{pareto.Count} non-dominated of {allSorted.Count} ──\n");
+        Console.WriteLine(
+            $"{"Score",6} {"F(N)",7} {"Pc",4} {"O/F",4} {"SF",4} {"CR",4} " +
+            $"{"Isp",5} {"mass",6} {"σ_th",5}");
+        Console.WriteLine(new string('─', 76));
+
+        foreach (var r in pareto.OrderByDescending(r => r.Isp_SL))
+        {
+            Console.WriteLine(
+                $"{r.Score,6:F3} {r.Thrust,7:F0} {r.Pc_bar,4:F0} {r.OF,4:F1} {r.SF,4:F1} {r.CR,4:F1} " +
+                $"{r.Isp_SL,5:F0} {r.MassEstimate,6:F2} {r.sigma_thermal,5:F0}");
+        }
+    }
+
+    /// <summary>
+    /// "One engine per size class" shortlist: the single highest-<c>Score</c>
+    /// variant within each distinct thrust value. This is a SCALARIZED view —
+    /// it bakes the multi-objective trade-off into the weighted Score and is
+    /// NOT a Pareto front. For the genuine trade-off surface use
+    /// <see cref="ParetoFront"/>.
+    /// </summary>
+    public static List<DesignResult> BestScorePerThrust(IEnumerable<DesignResult> results) =>
+        results
+            .Where(r => r.Score > 0)
+            .GroupBy(r => r.Thrust)
+            .Select(g => g.OrderByDescending(r => r.Score).First())
+            .OrderBy(r => r.Thrust)
+            .ToList();
+
+    /// <summary>
+    /// Computes the TRUE non-dominated (Pareto-optimal) set over three
+    /// competing objectives:
+    /// <list type="bullet">
+    ///   <item>maximize <c>Isp_SL</c> (higher specific impulse is better),</item>
+    ///   <item>minimize <c>MassEstimate</c> (lighter is better),</item>
+    ///   <item>minimize <c>sigma_thermal</c> (lower thermal stress is better).</item>
+    /// </list>
+    /// A design A <i>dominates</i> B when A is at least as good as B on every
+    /// objective and strictly better on at least one. The Pareto front is the
+    /// set of designs dominated by nobody — the honest engineering trade-off
+    /// surface, with no scalar weighting collapsing the choices.
+    ///
+    /// Only physically-meaningful variants (<c>Isp_SL &gt; 0</c>, finite mass)
+    /// are considered, so failed-physics rows do not pollute the front.
+    /// O(n²) pairwise comparison — fine for the ~8.6k grid sweep.
+    ///
+    /// Thin wrapper over the generic <see cref="ParetoFront{T}"/> so the grid
+    /// sweep, the outer sweep, and the viewer all share ONE domination kernel.
+    /// </summary>
+    public static List<DesignResult> ParetoFront(IEnumerable<DesignResult> results) =>
+        ParetoFront(results, r => (r.Isp_SL, r.MassEstimate, r.sigma_thermal));
+
+    /// <summary>
+    /// Generic non-dominated (Pareto-optimal) front over the same three-objective
+    /// trade-off — maximize the first selected value (Isp), minimize the second
+    /// (mass) and third (thermal stress). The single domination kernel used by
+    /// every caller: <see cref="DesignResult"/> (the grid sweep) goes through the
+    /// overload above, and the Phase 2 viewer feeds <c>SweepResult</c> samples
+    /// through this method directly so the score-ranking view and the Pareto view
+    /// can never disagree about what "non-dominated" means.
+    ///
+    /// <paramref name="objectives"/> projects each item to
+    /// <c>(ispMax, massMin, sigmaMin)</c>. Degenerate rows (non-positive Isp or
+    /// mass, or negative stress) are filtered out so failed-physics samples never
+    /// pollute the front. O(n²) pairwise comparison — fine for the ≤8.6k grid and
+    /// the ≤5k viewer sweeps.
+    /// </summary>
+    public static List<T> ParetoFront<T>(
+        IEnumerable<T> results,
+        Func<T, (float ispMax, float massMin, float sigmaMin)> objectives)
+    {
+        // Project once, keep the original item alongside its 3 objectives so we
+        // never re-invoke the selector inside the O(n²) inner loop.
+        var pts = new List<(T Item, float Isp, float Mass, float Sigma)>();
+        foreach (var r in results)
+        {
+            var (isp, mass, sigma) = objectives(r);
+            if (isp > 0f && mass > 0f && sigma >= 0f)
+                pts.Add((r, isp, mass, sigma));
+        }
+
+        // A dominates B  ⇔  A no worse on all 3 objectives AND strictly better on ≥1.
+        static bool Dominates(
+            (T Item, float Isp, float Mass, float Sigma) a,
+            (T Item, float Isp, float Mass, float Sigma) b)
+        {
+            bool noWorse =
+                a.Isp   >= b.Isp   &&   // max Isp
+                a.Mass  <= b.Mass  &&   // min mass
+                a.Sigma <= b.Sigma;     // min thermal stress
+
+            bool strictlyBetter =
+                a.Isp   >  b.Isp   ||
+                a.Mass  <  b.Mass  ||
+                a.Sigma <  b.Sigma;
+
+            return noWorse && strictlyBetter;
+        }
+
+        var front = new List<T>();
+        foreach (var candidate in pts)
+        {
+            bool dominated = false;
+            foreach (var other in pts)
+            {
+                if (Dominates(other, candidate)) { dominated = true; break; }
+            }
+            if (!dominated)
+                front.Add(candidate.Item);
+        }
+        return front;
     }
 }

@@ -14,10 +14,6 @@ public static class HeatTransfer
     {
         Library.Log("── Step 3: Heat Transfer ──");
 
-        float Dt_m = S.Dt;  // m — throat equivalent diameter
-        float Rc = 0.382f * Dt_m / 2f;  // m — throat radius of curvature (standard)
-        float At_mm2 = S.At * 1e6f;  // mm²
-
         // Recovery factor for adiabatic wall temperature
         float recoveryFactor = MathF.Pow(S.Pr_gas, 0.33f);  // ~0.82
         float T_aw = recoveryFactor * S.Tc;  // K
@@ -26,27 +22,41 @@ public static class HeatTransfer
         float T_wg = S.T_max_service;  // K — design to material limit
 
         // ── Bartz at throat (peak heat flux)
-        // hg = (0.026/Dt^0.2) × (μ^0.2 × Cp / Pr^0.6) × (Pc/c*)^0.8 × (Dt/Rc)^0.1 × (At/A)^0.9
-        float baseBartz =
-            0.026f / MathF.Pow(Dt_m, 0.2f)
-            * MathF.Pow(S.mu_gas, 0.2f) * S.Cp_transport / MathF.Pow(S.Pr_gas, 0.6f)
-            * MathF.Pow(S.Pc / S.cStar, 0.8f)
-            * MathF.Pow(Dt_m / Rc, 0.1f);
+        // hg = baseBartz × (At/A)^0.9 × σ,  where σ is the Mach/wall-temperature
+        // boundary-layer correction (= 1 at the throat by construction below).
+        // baseBartz collapses everything in the Bartz correlation that does NOT
+        // vary along z; it is recomputed identically in BaseBartz(S) so the
+        // per-station HeatFlux() and this throat anchor share one definition.
+        float baseBartz = BaseBartz(S);
 
-        // At throat: At/A = 1.0
+        // At throat: At/A = 1.0, M = 1.0 → σ/σ_throat = 1.0
         float hg_throat = baseBartz * MathF.Pow(1.0f, 0.9f);
         float q_raw = hg_throat * (T_aw - T_wg);
 
         // Film cooling: reduces effective T_aw near the wall
         // η_fc × fraction → effective reduction of driving temperature difference
-        float filmReduction = 1f - S.filmCoolFraction * S.filmCoolEffectiveness
-            * (T_aw - 300f) / (T_aw - T_wg); // 300K = film coolant temperature
-        filmReduction = Math.Clamp(filmReduction, 0.3f, 1f);
+        float filmReduction = FilmReduction(S, T_aw, T_wg);
         S.qThroat = q_raw * filmReduction;
 
         Library.Log($"  hg(throat)={hg_throat:F0} W/(m²·K)");
         Library.Log($"  T_aw={T_aw:F0} K, T_wg={T_wg:F0} K");
         Library.Log($"  q(raw)={q_raw/1e6:F1} MW/m², film={filmReduction:F2}, q(eff)={S.qThroat/1e6:F1} MW/m²");
+
+        // ── Throat sanity anchor: cross-check the calibrated scalar S.qThroat
+        // against an INDEPENDENT per-station Bartz evaluation at z=zThroat.
+        // HeatFluxLocal() solves local Mach from the area ratio and rebuilds q
+        // from σ(M)/area/ΔT/film. At the throat M must resolve to ≈1, so the two
+        // numbers must agree closely; a large gap means the Mach inverter or
+        // branch selection is broken. Tolerance ~15% per the fidelity spec.
+        float qThroat_perStation = HeatFluxLocal(S, S.zThroat);
+        float anchorDiff = S.qThroat > 1f
+            ? MathF.Abs(qThroat_perStation - S.qThroat) / S.qThroat
+            : 0f;
+        Library.Log($"  q(throat) anchor: scalar={S.qThroat/1e6:F1} MW/m², " +
+                    $"per-station={qThroat_perStation/1e6:F1} MW/m² (Δ={anchorDiff*100:F1}%)");
+        if (anchorDiff > 0.15f)
+            Library.Log($"  WARNING: per-station Bartz disagrees with throat anchor by " +
+                        $"{anchorDiff*100:F1}% (>15%) — check Mach inversion at the throat");
 
         // ── Wall thickness at throat (from pressure + LPBF minimum)
         // t = Pc × r / (σ_yield / SF)
@@ -171,19 +181,129 @@ public static class HeatTransfer
     }
 
     /// Heat flux q(z) at any axial station (W/m²)
+    ///
+    /// Per-station Bartz: instead of scaling the single throat value by area ratio
+    /// alone, this recomputes the gas-side coefficient hg(z) from the LOCAL Mach
+    /// number (solved from the local area ratio) and the Bartz boundary-layer /
+    /// wall-temperature correction σ(M). The area term (At/A)^0.9 and the σ(M)
+    /// correction together replace the old single (At/A)^0.9 factor. By
+    /// construction the result equals the calibrated S.qThroat at z=zThroat
+    /// (M→1, area ratio→1, σ/σ_throat→1), so the throat stays the peak anchor and
+    /// every caller's q/qThroat ∈ [0,1] invariant is preserved (see numeric proof
+    /// in the backlog note: σ/σ_throat·(At/A)^0.9 ≤ 1 on both Mach branches).
     public static float HeatFlux(AeroSpec S, float z)
+        => HeatFluxLocal(S, z);
+
+    /// Absolute per-station Bartz heat flux (W/m²) — the physics core behind
+    /// HeatFlux(). Kept separate so Compute() can call it for the throat anchor
+    /// cross-check without any dependency on the cached S.qThroat scalar.
+    private static float HeatFluxLocal(AeroSpec S, float z)
     {
         float At_mm2 = S.At * 1e6f;
         float A_mm2 = ChamberSizing.AnnularArea(S, z);
         if (A_mm2 < 1f) return 0f;
 
+        // Local area ratio At/A ∈ (0,1]; A ≥ At everywhere except the throat.
         float AtOverA = Math.Clamp(At_mm2 / A_mm2, 0.01f, 1.0f);
-        float hgNorm = MathF.Pow(AtOverA, 0.9f);
+        float areaTerm = MathF.Pow(AtOverA, 0.9f);
 
+        // Local Mach from the isentropic area–Mach relation. Below the throat
+        // (toward the spike tip / external expansion) the flow is supersonic;
+        // at and above the throat (convergent + chamber) it is subsonic.
+        bool supersonic = z < S.zThroat;
+        float areaRatio = 1f / AtOverA;                 // A/At ≥ 1
+        float M = MachFromAreaRatio(S.gamma, areaRatio, supersonic);
+
+        // Bartz σ correction, normalised by its throat value so the area term
+        // alone sets the throat magnitude (σ(M=1)/σ_throat = 1).
+        float sigmaNorm = BartzSigma(S, M) / BartzSigma(S, 1f);
+
+        // Driving temperature difference + film reduction (same model as the
+        // throat anchor in Compute()).
         float recoveryFactor = MathF.Pow(S.Pr_gas, 0.33f);
         float T_aw = recoveryFactor * S.Tc;
+        float T_wg = S.T_max_service;
+        float filmReduction = FilmReduction(S, T_aw, T_wg);
 
-        return S.qThroat * hgNorm;  // W/m² (scaled from throat peak)
+        float hg = BaseBartz(S) * areaTerm * sigmaNorm;
+        return hg * (T_aw - T_wg) * filmReduction;       // W/m²
+    }
+
+    /// z-independent part of the Bartz correlation (W/(m²·K) up to the area+σ
+    /// factors). Depends only on throat diameter and gas transport properties —
+    /// all already-populated public AeroSpec fields. Single source of truth so
+    /// Compute()'s throat value and the per-station HeatFlux agree exactly.
+    private static float BaseBartz(AeroSpec S)
+    {
+        float Dt_m = S.Dt;
+        float Rc   = 0.382f * Dt_m / 2f;            // throat radius of curvature
+        return 0.026f / MathF.Pow(Dt_m, 0.2f)
+            * MathF.Pow(S.mu_gas, 0.2f) * S.Cp_transport / MathF.Pow(S.Pr_gas, 0.6f)
+            * MathF.Pow(S.Pc / S.cStar, 0.8f)
+            * MathF.Pow(Dt_m / Rc, 0.1f);
+    }
+
+    /// Bartz boundary-layer / wall-temperature correction factor σ(M).
+    /// σ = 1 / [ (½·(Twg/Tc)·(1+(γ-1)/2·M²) + ½)^(0.8-0.2ω) · (1+(γ-1)/2·M²)^(0.2ω) ]
+    /// with ω≈0.6 (viscosity–temperature exponent). Standard form, e.g.
+    /// Huzel & Huang, "Modern Engineering for Design of LRPE", Bartz correlation.
+    private static float BartzSigma(AeroSpec S, float M)
+    {
+        const float omega = 0.6f;
+        float stag = 1f + 0.5f * (S.gamma - 1f) * M * M;   // 1 + (γ-1)/2·M²
+        float Twg_over_Tc = S.T_max_service / S.Tc;
+        float term1 = MathF.Pow(0.5f * Twg_over_Tc * stag + 0.5f, 0.8f - 0.2f * omega);
+        float term2 = MathF.Pow(stag, 0.2f * omega);
+        return 1f / (term1 * term2);
+    }
+
+    /// Film-cooling reduction of the gas-side driving ΔT (shared by the throat
+    /// anchor and the per-station evaluation so they reconcile exactly).
+    private static float FilmReduction(AeroSpec S, float T_aw, float T_wg)
+    {
+        float r = 1f - S.filmCoolFraction * S.filmCoolEffectiveness
+            * (T_aw - 300f) / (T_aw - T_wg);   // 300K = film coolant temperature
+        return Math.Clamp(r, 0.3f, 1f);
+    }
+
+    /// Invert the isentropic area–Mach relation A/At = f(M, γ) for M, on the
+    /// requested branch. Exception-free bracketed bisection (the area–Mach
+    /// relation is monotonic on each branch), so it is safe in the per-voxel
+    /// hot path that PhysicsFields/HeatProfile drive HeatFlux() from.
+    ///   subsonic   branch: M ∈ (eps, 1]      (chamber + convergent)
+    ///   supersonic branch: M ∈ [1, Mmax]     (below throat, expanding flow)
+    private static float MachFromAreaRatio(float gamma, float areaRatio, bool supersonic)
+    {
+        if (areaRatio <= 1f) return 1f;                 // throat (or numerical ≤1)
+
+        float lo, hi;
+        if (supersonic) { lo = 1f;       hi = 12f;   }  // M up to 12 → AR huge
+        else            { lo = 0.001f;   hi = 1f;    }  // subsonic
+
+        // AreaRatio(M) = (1/M)·[ (2/(γ+1))·(1+(γ-1)/2·M²) ]^((γ+1)/(2(γ-1)))
+        float exp = (gamma + 1f) / (2f * (gamma - 1f));
+        float ARof(float M)
+        {
+            float stag = 1f + 0.5f * (gamma - 1f) * M * M;
+            return (1f / M) * MathF.Pow(2f / (gamma + 1f) * stag, exp);
+        }
+
+        // Clamp target into the achievable range of this branch to avoid running
+        // off the monotone interval (e.g. AR beyond hi → return the hi Mach).
+        float arHi = ARof(hi);
+        if (supersonic && areaRatio >= arHi) return hi;
+
+        // Fixed-iteration bisection (≈24 steps → ~1e-3 in M over [0,12]).
+        for (int i = 0; i < 24; i++)
+        {
+            float mid = 0.5f * (lo + hi);
+            float ar  = ARof(mid);
+            // ARof is decreasing in M on the subsonic branch, increasing on the
+            // supersonic branch — move the bound that keeps the root bracketed.
+            bool tooSmall = supersonic ? (ar < areaRatio) : (ar > areaRatio);
+            if (tooSmall) lo = mid; else hi = mid;
+        }
+        return 0.5f * (lo + hi);
     }
 
     /// Wall thickness at z (mm) — from pressure formula

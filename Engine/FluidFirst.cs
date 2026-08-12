@@ -1,11 +1,25 @@
-// FluidFirst.cs — SDF Composition Architecture (v6)
+// FluidFirst.cs — Voids-first build via voxel composition (v7)
 //
-// Chamber + channels + variable wall = ONE IImplicit (EngineBodyImplicit).
-// No voxel booleans for the core body. No OverOffset. No information loss.
-// Manifolds/ports/flange still added as Lattice → Voxels (simple shapes).
+// THIS IS THE PRODUCTION BUILD PATH (EngineAssembly.Build → FluidFirst.Build).
 //
-// Insight: design analysis (2026-04-01) confirmed that wall and
-// channels appear SIMULTANEOUSLY as one evaluated SDF field.
+// Honest description of what actually happens here:
+//   - Cooling channels are evaluated as TRUE IImplicit fields
+//     (RoutedChannelFieldImplicit: superellipse cross-section, print-angle exponent,
+//     port widening, turbulator ribs) and rendered to Voxels per group.
+//   - Gas path, spike body, manifolds, ports and flange are Lattice → Voxels.
+//   - These are combined with VOXEL BOOLEANS (BoolAdd / BoolSubtract / Trim):
+//       voids = channels ∪ gas-path
+//       outer = voids grown by VariableWallImplicit (per-z Barlow wall)
+//       solid = outer − voids + spike − LOX bore + lattice features
+//
+// So the build is fluid-first (voids drive the wall) but it is NOT a single
+// monolithic SDF. The "one IImplicit for the whole core" idea lives in
+// EngineBodyImplicit.cs, which is NOT wired into this path (see that file's header).
+// Per-voxel pieces that ARE single SDFs: the channel field and the wall field.
+//
+// Design rationale: the wall and the channels are not independent objects;
+// emerge together from the fluid voids — here, via the channel-void → variable-wall
+// offset chain rather than one fused field.
 
 using System.Diagnostics;
 using System.Numerics;
@@ -93,9 +107,10 @@ public static class FluidFirst
         onStage(new StageResult(StageId.AllVoids, new Mesh(voxInner),
             "All fluid voids", LapSec()));
 
-        // STEP 5: Walls = offset from voids
+        // STEP 5: Walls = VARIABLE (per-z Barlow) offset from voids
+        Voxels voxOuter = BuildVariableWallShell(S, voxInner);
+        // Representative wall (throat) — used only to position the nozzle-exit trim cap.
         float wallT = MathF.Max(HeatTransfer.WallThickness(S, S.zThroat), S.minPrintWall) + S.minPrintWall;
-        Voxels voxOuter = voxInner.voxOffset(wallT);
 
         // STEP 6: Fluid-first subtract + open nozzle exit + drill LOX bore
         Voxels voxSolid = voxOuter;
@@ -193,12 +208,13 @@ public static class FluidFirst
         Library.Log("  Inner volume = channels + gas.");
 
         // ══════════════════════════════════════
-        // STEP 5: WALLS = OFFSET FROM VOIDS
+        // STEP 5: WALLS = VARIABLE (per-z Barlow) OFFSET FROM VOIDS
         // ══════════════════════════════════════
-        Library.Log("Step 5: Grow walls (voxOffset)...");
+        Library.Log("Step 5: Grow variable walls (Barlow per-z)...");
+        Voxels voxOuter = BuildVariableWallShell(S, voxInner);
+        // Representative wall (throat) — used only to position the nozzle-exit trim cap.
         float wallT = MathF.Max(HeatTransfer.WallThickness(S, S.zThroat), S.minPrintWall) + S.minPrintWall;
-        Voxels voxOuter = voxInner.voxOffset(wallT);
-        Library.Log($"  Wall thickness: {wallT:F2} mm (offset from voids).");
+        Library.Log($"  Wall thickness: variable f(z) via Barlow (throat ≈ {wallT:F2} mm).");
 
         // ══════════════════════════════════════
         // STEP 6: FLUID-FIRST SUBTRACT (the moment)
@@ -247,6 +263,41 @@ public static class FluidFirst
 
         Library.Log("Done — voids-first build complete.");
         return voxSolid;
+    }
+
+    // ─────────────────────────────────────
+    // VARIABLE WALL: per-z Barlow wall shell around the void union
+    //
+    // Replaces the single scalar `voxInner.voxOffset(wallT)`. VariableWallImplicit
+    // wraps the void SDF (via ScalarField) and returns dVoid - wall(z), where
+    // wall(z) is the Barlow pressure thickness — thicker at high pressure / structural
+    // zones, thinner where cooling carries the load. The min-print-wall clamp lives
+    // inside the implicit (wall = max(wall, minPrintWall)), so thin spots stay printable.
+    //
+    // Voxelizing the implicit over the void bbox grown by maxWall gives `voxOuter`
+    // = void ∪ wall-shell; Step 6 then subtracts voxInner to leave the shell.
+    // ─────────────────────────────────────
+    static Voxels BuildVariableWallShell(AeroSpec S, Voxels voxInner)
+    {
+        var wallField = new VariableWallImplicit(voxInner, S);
+
+        // Bounds: void extent grown by the LARGEST wall the field can emit, so the
+        // offset surface is never clipped. VariableWallImplicit applies a ×1.5 structural
+        // multiplier near the injector and clamps to minPrintWall, so sample the Barlow
+        // wall across the full z range and scale by the same worst-case factor.
+        voxInner.CalculateProperties(out _, out BBox3 voidBox);
+
+        float maxBarlow = S.minPrintWall;
+        for (float z = S.zTip; z <= S.zInjector + 5f; z += 2f)
+            maxBarlow = MathF.Max(maxBarlow, HeatTransfer.WallThickness(S, z));
+        // ×1.5 = largest structural multiplier in VariableWallImplicit; + margins.
+        float maxWall = maxBarlow * 1.5f + 2f * S.minPrintWall + 3f;
+
+        BBox3 bounds = new BBox3(
+            new Vector3(voidBox.vecMin.X - maxWall, voidBox.vecMin.Y - maxWall, voidBox.vecMin.Z - maxWall),
+            new Vector3(voidBox.vecMax.X + maxWall, voidBox.vecMax.Y + maxWall, voidBox.vecMax.Z + maxWall));
+
+        return new Voxels(wallField, bounds);
     }
 
     // ─────────────────────────────────────
@@ -331,34 +382,27 @@ public static class FluidFirst
     }
 
     // ─────────────────────────────────────
-    // CHANNEL VOIDS: Lattice tubes from spine paths
+    // CHANNEL VOIDS: TRUE channel geometry via RoutedChannelFieldImplicit
+    //
+    // The implicit evaluates a superellipse cross-section per voxel with:
+    //   - print-angle-adaptive superellipse exponent
+    //   - spatial θ-modulation of radial half-height (continuous — no per-index steps)
+    //   - turbulator ribs (smoothstep-faded, continuous)
+    //   - port-aware widening folded into the field
+    // This replaces the old circular-Lattice approximation (radius min(w,h)/2),
+    // which discarded all of the above. Mirrors Program.cs (~line 89):
+    //   new RoutedChannelFieldImplicit(spec, route, isShroud)
+    //
+    // CONTINUITY: the implicit's fSignedDistance is continuous (θ-mod is a spatial
+    // atan2 function, not a per-channel step), so the rendered voids stay watertight.
     // ─────────────────────────────────────
     static Voxels BuildChannelVoids(AeroSpec S, ChannelRouteResult route, bool isShroud)
     {
-        Lattice lat = new Lattice();
+        if (route.Spines.Count == 0)
+            return new Voxels();
 
-        foreach (var spine in route.Spines)
-        {
-            for (int i = 0; i < spine.Count - 1; i++)
-            {
-                float z = (spine[i].Z + spine[i + 1].Z) / 2f;
-                float r;
-                if (isShroud)
-                {
-                    var (w, h) = HeatTransfer.ChannelRect(S, z);
-                    r = MathF.Min(w, h) / 2f;  // approximate rectangular as circular
-                }
-                else
-                {
-                    var (w, h) = HeatTransfer.ChannelRectSpike(S, z);
-                    r = MathF.Min(w, h) / 2f;
-                }
-                r = MathF.Max(r, S.minChannel / 2f);
-                lat.AddBeam(spine[i], spine[i + 1], r, r);
-            }
-        }
-
-        return new Voxels(lat);
+        var field = new RoutedChannelFieldImplicit(S, route, isShroud);
+        return new Voxels(field, field.GetBBox());
     }
 
     // ─────────────────────────────────────

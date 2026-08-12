@@ -29,6 +29,10 @@ class Program
             switch (args[0].ToLowerInvariant())
             {
                 case "--physics": PhysicsOnly(); return;
+                // 0.4 mm is the FINEST of the three voxel defaults and matches
+                // AeroSpec.voxelSize (the batch-STL resolution). The interactive
+                // viewer (AppMain) runs a coarser 0.5 mm core grid for responsiveness;
+                // these are intentionally different — see comments in AppMain/ControlPanel.
                 case "--headless": BuildEngineHeadless(0.4f); return;
                 case "--sweep": DesignSweep.Run(); return;
                 case "--single":

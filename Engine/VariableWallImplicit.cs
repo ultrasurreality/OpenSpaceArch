@@ -60,13 +60,43 @@ public class VariableWallImplicit : IImplicit
         // Wall thickness at this point
         float wall = WallAtZ(v.Z);
 
-        // Extra thickness at structural zones
-        if (v.Z > _S.zInjector - 3f) wall *= 1.5f;
-        if (v.Z < _S.zTip + 3f) wall *= 1.3f;
+        // Extra thickness at structural zones — applied as CONTINUOUS smoothstep ramps,
+        // NOT hard if-steps. A discontinuous step in wall(z) puts a step in the offset
+        // surface SDF (dVoid - wall) and risks a non-watertight seam at the step plane.
+        //
+        // Dome reinforcement (G3-thinwall): the injector dome breached at the dome BASE
+        // (~zChTop), not just at the faceplate. Ramp the structural multiplier in across
+        // the dome (peaking ×1.5 at the faceplate) so the dome wall is thick where the
+        // channel void used to pinch the skin.
+        //
+        // v2 FRAGMENTATION FIX: the channel cross-section is tapered to ZERO over
+        // [zChTop - ~6 mm, zChTop] (RoutedChannelFieldImplicit dome taper). Previously the
+        // dome reinforcement only began AT zChTop, leaving a thin-wall HANDOFF band just
+        // below zChTop where the channels are nearly pinched out but the wall has not yet
+        // thickened — there the metal between adjacent closing channels can fragment
+        // (body_count 28→48). Start the ramp domePreRoll (6 mm) BELOW zChTop so the wall is
+        // already thickening as the channels close, fusing the metal across the handoff and
+        // keeping the shell connected. Still a continuous smoothstep (no step); the +0%→+50%
+        // multiplier only grows the wall, so it cannot thin anything below the Barlow value.
+        const float domePreRoll = 6f; // mm — matches the channel-close band floor (max(fadeLen,6))
+        float domeRamp = Smoothstep(_S.zChTop - domePreRoll, _S.zInjector, v.Z); // 0 below band → 1 at faceplate
+        wall *= 1f + 0.5f * domeRamp;
 
+        // Tip reinforcement: ramp ×1.3 in over the bottom 3 mm (continuous, no step).
+        float tipRamp = Smoothstep(_S.zTip + 3f, _S.zTip, v.Z);    // 0 above the band → 1 at the tip
+        wall *= 1f + 0.3f * tipRamp;
+
+        // Hard floor: the emitted wall is NEVER thinner than the LPBF minimum, EVERYWHERE
+        // (this clamp runs AFTER every multiplier, so it applies at the injector/dome too).
         wall = MathF.Max(wall, _S.minPrintWall);
 
         // Outer shell: inside if within 'wall' distance of void surface
         return dVoid - wall;
+    }
+
+    static float Smoothstep(float edge0, float edge1, float x)
+    {
+        float t = Math.Clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
+        return t * t * (3f - 2f * t);
     }
 }

@@ -1,4 +1,11 @@
-// EngineBodyImplicit.cs — ONE SDF for the entire engine core
+// EngineBodyImplicit.cs — single-SDF engine core (ALTERNATIVE DESIGN, NOT WIRED IN)
+//
+// STATUS (2026-06-03): NOT part of the production build. EngineAssembly.Build →
+// FluidFirst.Build, which composes the body from per-group Voxels with booleans.
+// This class is the "one fused SDF for the whole core" idea, kept as a reference /
+// future path. It is currently not instantiated anywhere. If you reactivate it,
+// have EngineAssembly construct it (shroud + spike RevolutionSDFs + the two channel
+// fields) and render once over GetBBox().
 //
 // v7 VOIDS-FIRST formula (2026-04-12):
 //   dVoid = min(dGas, dChShroud, dChSpike)   -- union ALL fluid voids

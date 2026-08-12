@@ -16,6 +16,18 @@ public class AeroSpec
     // Channel generation mode
     public ChannelMode channelMode = ChannelMode.Routed_v5b;
 
+    // Spike-interior topology (P2 prototype — DEFAULT OFF).
+    // false (default): the spike interior is cooled by longitudinal helical channels
+    //                  (ChannelRouter.RouteSpikeChannels → RoutedChannelFieldImplicit).
+    //                  THIS IS THE WORKING, SHIPPED PATH.
+    // true:            reserved for the experimental 3-D branching-truss / tree-growth
+    //                  interior (SpikeTreeRouter) that mirrors the real LEAP 71 plug.
+    //                  NOT wired into FluidFirst yet — flipping this today changes NOTHING
+    //                  in the build; it only marks intent so the prototype is reachable
+    //                  later without touching the working spike path. See
+    //                  ARCHITECTURE.md and Engine/SpikeTreeRouter.cs.
+    public bool useSpikeTree = false;
+
     // ============================================================
     // INPUTS (the ONLY manually specified values)
     // ============================================================
@@ -47,7 +59,11 @@ public class AeroSpec
     public float phaseDistributionExponent     = 1f;    // 1.0 = full golden ratio phyllotaxis, 0.0 = uniform + jitter
 
     // Manufacturing constraints (LPBF)
-    public float voxelSize   = 0.4f;        // mm — voxel resolution
+    // voxelSize 0.4 mm is the HEADLESS/BUILD resolution (fits ~5 GB RAM, used by
+    // the batch STL generation path). The interactive viewer/UI deliberately
+    // defaults to a different (finer or coarser) resolution for previewing —
+    // that divergence is intentional, do NOT "sync" them by editing this value.
+    public float voxelSize   = 0.4f;        // mm — voxel resolution (headless/build default)
     public float minPrintWall = 0.5f;       // mm — LPBF minimum wall
     public float minChannel   = 1.0f;       // mm — minimum channel diameter for powder removal
     public float minRibWall  = 1.2f;       // mm — min wall between channels (≥3 voxels at 0.4mm)

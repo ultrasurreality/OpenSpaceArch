@@ -64,6 +64,14 @@ public static class AppMain
 
     public static void Run()
     {
+        // Voxel resolution: this 0.5 mm is the PicoGK core grid the whole interactive
+        // viewer voxelizes on. It is one of three deliberately-distinct defaults:
+        //   • AeroSpec.voxelSize     = 0.4 mm — headless/batch STL (--headless path, finest, ~5 GB RAM)
+        //   • this InitHeadless      = 0.5 mm — interactive viewer core grid
+        //   • ControlPanel.VoxelSize = 0.5 mm — value the panel writes into BuildSpec()
+        // The panel default was aligned to this 0.5 mm core grid; both sit safely above
+        // EngineValidator's C12 floor (voxel < throatGap/2 ≈ 1.53 mm for the 5 kN engine).
+        // Do NOT force these equal — preview trades a little resolution for responsiveness.
         Library.InitHeadless(voxelSizeMM: 0.5f);
 
         _app = AppWindow.Create(1600, 900, "OpenSpaceArch — Cinematic Viewer + Simulation");
@@ -213,10 +221,12 @@ public static class AppMain
             _profiles.Upload(spec);
             _previewSpec = spec;
 
-            // Phase 1: live constraint validation. Reactive to every slider
-            // change because UpdatePreviewProfiles is gated by _previewParamHash
-            // — runs only when a parameter actually changed. The ConstraintsPanel
-            // reads _liveViability on each HandleRender tick.
+            // Phase 1: live constraint validation. Recomputed only when a
+            // hash-tracked parameter actually changed (this method is gated by
+            // _previewParamHash above: F_thrust, Pc, O/F, voxel, channelMode,
+            // CR, L*, SF). Parameters outside that hash (e.g. twist) do NOT
+            // refresh it. The ConstraintsPanel reads _liveViability on each
+            // HandleRender tick but only sees a new value after such a change.
             _liveViability = EngineValidator.Check(spec);
         }
         catch (Exception ex)

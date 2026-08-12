@@ -56,6 +56,30 @@ public static class EngineValidator
         return new CheckResult(name, slack >= 0f, detail, slack, norm);
     }
 
+    /// <summary>
+    /// Builds an INDETERMINATE check result for the case where a required
+    /// physics input is still at its 0/default value — i.e. the physics chain
+    /// (Thermochemistry → ChamberSizing → HeatTransfer) has not populated it
+    /// before <see cref="Check"/> ran.
+    /// <para>
+    /// Without this guard a missing input silently propagates to a hard FAIL
+    /// (e.g. a_sound = 0 ⇒ f_1L = 0 ⇒ "acoustic separation" always fails),
+    /// which is dishonest: the constraint was never actually evaluated. We
+    /// instead report it as skipped. <see cref="CheckResult.Passed"/> is set
+    /// to <c>true</c> so an un-run check never *blocks* ignition on its own —
+    /// but the detail and a neutral (zero) slack make clear it carries no real
+    /// safety margin. Shape of <see cref="CheckResult"/>/<see cref="Viability"/>
+    /// is unchanged.
+    /// </para>
+    /// </summary>
+    private static CheckResult Indeterminate(string name, string missingInput)
+        => new CheckResult(name, true,
+            $"indeterminate — {missingInput} not populated (physics chain not run?)",
+            0f, 0f);
+
+    /// <summary>True when a required physics value is unset (≤ 0) or non-finite.</summary>
+    private static bool Unset(float v) => !(v > 0f) || float.IsNaN(v) || float.IsInfinity(v);
+
     public static Viability Check(AeroSpec S)
     {
         var checks = new List<CheckResult>();
@@ -132,13 +156,23 @@ public static class EngineValidator
         }
 
         // C8. Burst safety > 1.2 (Barlow hoop stress — equivalent to predicate P8)
-        float sigmaAllow = S.sigma_yield;    // Pa, from AeroSpec material
-        float tBurst = S.Pc * S.rShroudThroat * 1e-3f / sigmaAllow * 1000f;  // mm required
-        float burstSafety = (tBurst > 1e-6f) ? wall / tBurst : 999f;
+        // tBurst = minimum wall to reach yield (SF 1.0). The check requires the
+        // actual wall to clear that by a 1.2× margin, i.e. wall >= 1.2·tBurst.
+        if (Unset(S.sigma_yield))
         {
+            checks.Add(Indeterminate("Burst safety > 1.2", "sigma_yield"));
+        }
+        else
+        {
+            float sigmaAllow = S.sigma_yield;    // Pa, from AeroSpec material
+            float tBurst = S.Pc * S.rShroudThroat * 1e-3f / sigmaAllow * 1000f;  // mm — Barlow wall at yield (SF=1)
+            float tRequired = 1.2f * tBurst;     // mm — wall needed to satisfy the 1.2 margin
+            float burstSafety = (tBurst > 1e-6f) ? wall / tBurst : 999f;
+            // Detail compares actual wall against the already-1.2-inflated requirement,
+            // so the 1.2 lives in ONE place (tRequired) and is not double-counted with the ratio.
             float slack = burstSafety - 1.2f;
             checks.Add(Make("Burst safety > 1.2",
-                $"ratio {burstSafety:F2} (need {tBurst * 1.2f:F2} mm, have {wall:F2} mm)",
+                $"wall {wall:F2} mm vs required {tRequired:F2} mm (= 1.2 x {tBurst:F2} mm Barlow); margin {burstSafety:F2}x",
                 slack, refScale: 2f));
         }
 
@@ -190,10 +224,20 @@ public static class EngineValidator
         // C13. Thermal stress at throat (predicate P9 — thermal + Lame)
         // σ_th = E · α · ΔT / (1 - ν), where ΔT = q · t / k (Fourier drop across wall)
         // Must stay under σ_yield / SF.
+        // Guard: qThroat (HeatTransfer), k_wall, E_mod, alpha_CTE and sigma_yield
+        // must all be populated. If qThroat or k_wall were 0, ΔT collapses to 0
+        // and the check would PASS with zero thermal stress — a false "safe".
+        if (Unset(S.qThroat) || Unset(S.k_wall) || Unset(S.E_mod)
+            || Unset(S.alpha_CTE) || Unset(S.sigma_yield))
+        {
+            checks.Add(Indeterminate("Thermal stress < yield/SF",
+                "qThroat/k_wall/E_mod/alpha_CTE/sigma_yield"));
+        }
+        else
         {
             float k = S.k_wall;       // W/(m·K)
             float t_m = wall * 1e-3f; // wall thickness in meters
-            float dT = (k > 1e-6f) ? S.qThroat * t_m / k : 0f;
+            float dT = S.qThroat * t_m / k;
             float sigma_th = S.E_mod * S.alpha_CTE * dT / Math.Max(1e-6f, 1f - S.nu_poisson);
             float sigma_allow_th = S.sigma_yield / Math.Max(0.1f, S.SF);
             float slack = (sigma_allow_th - sigma_th) / 1e6f;   // MPa
@@ -206,6 +250,15 @@ public static class EngineValidator
         // Approx: ṁ_fuel · Cp · ΔT_allow ≥ q_throat · A_hot_throat
         // ΔT_allow = 600 K (CH4 decomposition ceiling minus inlet ~120 K).
         // A_hot_throat = 2π · r_shroud_throat · L_throat_region (≈ 2·Dt)
+        // Guard: qThroat + mDot_fuel come from HeatTransfer, Cp_coolant_shroud
+        // is a material constant. If mDot_fuel = 0 the check would FAIL (false
+        // "no capacity"); if qThroat = 0 it would PASS (false "no load").
+        if (Unset(S.qThroat) || Unset(S.mDot_fuel) || Unset(S.Cp_coolant_shroud))
+        {
+            checks.Add(Indeterminate("Coolant capacity > throat Q",
+                "qThroat/mDot_fuel/Cp_coolant_shroud"));
+        }
+        else
         {
             float rT = S.rShroudThroat * 1e-3f;    // m
             float Dt_m = 2f * rT;                   // throat diameter, m
@@ -224,10 +277,19 @@ public static class EngineValidator
         // C15. Acoustic 1L mode > 3 · combustion frequency (predicate S1)
         // f_1L ≈ a_sound / (2 · Lc)            (longitudinal half-wave)
         // f_comb ≈ c_star / L*                 (characteristic chamber turnover)
+        // Guard: a_sound + cStar come from Thermochemistry, Lc from ChamberSizing.
+        // If a_sound = 0 (thermochem not run) f_1L collapses to 0 and the check
+        // would ALWAYS fail — the textbook silent-failure case this guard exists
+        // for. Lstar is an input but treat 0 the same way (undefined f_comb).
+        if (Unset(S.a_sound) || Unset(S.cStar) || Unset(S.Lc) || Unset(S.Lstar))
+        {
+            checks.Add(Indeterminate("f_1L > 3 · f_comb", "a_sound/cStar/Lc/Lstar"));
+        }
+        else
         {
             float Lc_m = S.Lc * 1e-3f;              // m
-            float f_1L = (Lc_m > 1e-6f) ? S.a_sound / (2f * Lc_m) : 0f;
-            float f_comb = (S.Lstar > 1e-6f) ? S.cStar / S.Lstar : 0f;
+            float f_1L = S.a_sound / (2f * Lc_m);
+            float f_comb = S.cStar / S.Lstar;
             float slack = f_1L - 3f * f_comb;
             checks.Add(Make("f_1L > 3 · f_comb",
                 $"1L {f_1L:F0} Hz vs 3·comb {3f * f_comb:F0} Hz",
@@ -237,8 +299,15 @@ public static class EngineValidator
         // C16. Combustion residence time (characteristic chamber)
         // τ_stay ≈ L* / c_star. Minimum ~1 ms for stable combustion
         // (Sutton RPE ch. 5, typical range 1-5 ms).
+        // Guard: cStar from Thermochemistry, Lstar an input. cStar = 0 gives
+        // τ = 0 and a false FAIL.
+        if (Unset(S.cStar) || Unset(S.Lstar))
         {
-            float tau = (S.cStar > 1e-6f) ? S.Lstar / S.cStar * 1e3f : 0f;  // ms
+            checks.Add(Indeterminate("Residence time > 1 ms", "cStar/Lstar"));
+        }
+        else
+        {
+            float tau = S.Lstar / S.cStar * 1e3f;  // ms
             float slack = tau - 1f;
             checks.Add(Make("Residence time > 1 ms",
                 $"τ_stay {tau:F2} ms (L*={S.Lstar:F2} m, c*={S.cStar:F0} m/s)",

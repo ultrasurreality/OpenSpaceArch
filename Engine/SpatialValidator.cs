@@ -1,7 +1,13 @@
 // SpatialValidator.cs — Геометрическая валидация без вокселей
 //
-// Проверяет пространственные конфликты между всеми элементами двигателя
-// чистой математикой. Каждый элемент — функция положения и размера от z.
+// Проверяет пространственные конфликты несущих элементов двигателя
+// (каналы shroud/spike vs камера, коллектор, болты фланца) чистой
+// математикой. Каждый элемент — функция положения и размера от z.
+//
+// НЕ проверяет feed ports, вейны и манифолд как жёсткие конфликты:
+// они пересекают каналы BY DESIGN, mutual exclusion (voxOffset subtract)
+// вырезает каналы вокруг них. Для них проверяется только адекватность
+// размера (порт не убивает >25% каналов).
 
 using System.Numerics;
 
@@ -18,16 +24,17 @@ public static class SpatialValidator
         float zStep = 1f; // проверяем каждый мм
 
         // ── Каналы shroud vs камера (gas path) ──
-        for (float z = S.zCowl + 2f; z <= S.zInjector - 2f; z += zStep)
+        // v7: каналы заканчиваются на zChTop (chamber top), не на zInjector —
+        // выше них коллектор, не канал. Проверяем только зону каналов.
+        for (float z = S.zCowl + 2f; z <= S.zChTop - 2f; z += zStep)
         {
             float rShroud = ChamberSizing.ShroudProfile(S, z);
             if (rShroud < 2f) continue;
             float wall = HeatTransfer.WallThickness(S, z);
             var (cw, ch) = HeatTransfer.ChannelRect(S, z);
 
-            // Внутренний край канала = rShroud + wall
-            // Должен быть > rShroud (поверхность камеры) + minWall
-            float channelInner = rShroud + wall;
+            // Внутренний край канала = rShroud + wall; стенка камеры до канала
+            // и есть зазор. Должна быть > minWall.
             float gap = wall; // wall IS the gap
             if (gap < minWall)
                 conflicts.Add(new("shroud_channel", "chamber", z, gap, minWall));
@@ -42,14 +49,15 @@ public static class SpatialValidator
         }
 
         // ── Каналы spike vs камера ──
-        for (float z = S.zCowl + 2f; z <= S.zInjector - 2f; z += zStep)
+        // v7: spike-каналы тоже стопаются на zChTop, выше — solid spike body.
+        for (float z = S.zCowl + 2f; z <= S.zChTop - 2f; z += zStep)
         {
             float rSpike = ChamberSizing.SpikeProfile(S, z);
             if (rSpike < 3f) continue;
             float wall = HeatTransfer.WallThickness(S, z);
             var (cw, ch) = HeatTransfer.ChannelRectSpike(S, z);
 
-            float channelOuter = rSpike - wall;
+            // Стенка spike до канала = зазор; должна быть > minWall.
             if (wall < minWall)
                 conflicts.Add(new("spike_channel", "chamber", z, wall, minWall));
 

@@ -1,5 +1,13 @@
 // SurfaceTurtle.cs — Turtle walk on SDF surface
 //
+// RETAINED FOR REFERENCE — NOT THE ACTIVE ROUTER.
+// The production channel router (ChannelRouter.RouteShroudChannels /
+// RouteSpikeChannels) builds ANALYTICAL helices directly on the revolution profile
+// (BuildAnalyticalHelix) — no turtle walk, no voxel-discretization artifacts, and it
+// is faster. This class is kept because it is the more general surface-following
+// approach (Josefine's turtle-graphics method) and would be the path to follow if a
+// future engine surface is not a body of revolution. Nothing in the build calls it.
+//
 // Josefine's routing algorithm: turtle graphics on voxelized surface.
 // Step → snap to surface → update heading. Simple, elegant, works on ANY surface.
 //

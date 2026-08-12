@@ -23,6 +23,15 @@ public sealed class PhysicsFields
     public int ThinWallViolations { get; private set; }
     public int OverhangViolations { get; private set; }
     public float OverhangMaxAngle { get; private set; }
+    // Honest breakdown of overhang violations (see MeasureOverhang for the
+    // geometric rationale). "Expected" = surfaces that an aerospike printed
+    // spike-tip-down legitimately has and that LPBF handles with minimal/local
+    // support (nozzle-exit cowl lip, outer shroud flare, top-flange underside).
+    // "Problematic" = shallow downward faces elsewhere (e.g. internal channel
+    // roofs, mid-body) that are the ones actually worth acting on.
+    public int OverhangExpected { get; private set; }
+    public int OverhangProblematic { get; private set; }
+    public float OverhangSteepestProblematicAngle { get; private set; }
 
     public void Compute(AeroSpec S, Voxels voxEngine,
                         RevolutionSDF shroudSDF, RevolutionSDF spikeSDF,
@@ -60,9 +69,11 @@ public sealed class PhysicsFields
 
     /// <summary>
     /// MEASURE real wall thickness on final voxels — not formula, geometry.
-    /// For each point on the channel surface, cast outward and find the
-    /// nearest outer surface of the solid engine. The gap = actual wall.
-    /// Compare with formula prediction. Flag violations.
+    /// For each point sampled inside a channel void, read the engine SDF at
+    /// that point. |SDF| = distance to the NEAREST solid surface (gas-side or
+    /// outer, whichever is closer), which is the local solid wall thickness.
+    /// This is a field lookup, not an outward ray-cast. Compare with the
+    /// formula prediction and flag violations below the min printable wall.
     /// </summary>
     public void MeasureWallThickness(AeroSpec S, Voxels voxEngine, IImplicit? channelsShroud)
     {
@@ -100,9 +111,10 @@ public sealed class PhysicsFields
                     // Avoid transition zone (|dCh| < 1) where SDF is noisy
                     if (dCh > -1f || dCh < -3f) continue;
 
-                    // Engine SDF at this point = distance to nearest solid surface
-                    // Since this point is inside a channel void (inside the engine),
-                    // the SDF gives distance to the nearest wall.
+                    // Engine SDF at this point = distance to nearest solid surface.
+                    // Since this point is inside a channel void (surrounded by solid),
+                    // |SDF| gives the distance to the nearest surface — gas-side or
+                    // outer, whichever is closer — i.e. the local wall thickness.
                     if (!engineSdf.bGetValue(pos, out float sdfVal)) continue;
 
                     // sdfVal is the signed distance. Near channel surface inside
@@ -166,24 +178,64 @@ public sealed class PhysicsFields
     }
 
     /// <summary>
-    /// Measure overhang angles on the final engine surface.
-    /// Extract surface normals from SDF gradient, check against maxOverhang.
-    /// Print axis is Z (vertical). Overhang = angle between surface normal and Z.
-    /// If normal points mostly sideways (angle > maxOverhang from vertical) — violation.
+    /// Measure overhang angles on the final engine surface for LPBF self-support.
+    ///
+    /// BUILD ORIENTATION (this is the load-bearing assumption — get it wrong and the
+    /// whole metric is meaningless). The engine is modelled and PRINTED spike-tip-down:
+    /// the spike apex sits at z = zTip = 0 (the minimum z, on the build plate) and the
+    /// injector/flange is at z = zInjector ≈ zMax (the top). Equivalently, the build
+    /// axis is +Z pointing UP. This is not an arbitrary convention — ChamberSizing
+    /// derives the injector-dome closure as a 45° self-supporting cone that closes
+    /// going UP toward +Z (domeDz = rSpikeChamber ⇒ 45° from horizontal), which only
+    /// self-supports when +Z is up. So +Z-up == spike-tip-down, and the surface-normal
+    /// Z component below is already in the correct print frame.
+    ///
+    /// ANGLE CONVENTION (the bug that inflated the old count). The previous version
+    /// computed acos(|n.Z|), called it "angle from vertical", and flagged it when it
+    /// EXCEEDED maxOverhang. That is inverted: acos(|n.Z|) is actually the surface's
+    /// inclination FROM HORIZONTAL (β). A flat downward ceiling (n=(0,0,-1)) gives
+    /// β = acos(1) = 0° — the WORST, fully-unsupported case — yet the old test passed
+    /// it (0 < 45). A near-vertical wall (n.Z≈0) gives β = acos(0) = 90° — the BEST,
+    /// fully self-supporting case — yet the old test FLAGGED it (90 > 45). An aerospike's
+    /// outer shroud and spike flanks are mostly steep near-vertical walls, so the old
+    /// metric mislabeled the self-supporting bulk of the surface as ~117k "violations".
+    ///
+    /// CORRECT RULE (standard AM): for a downward-facing surface, the self-support
+    /// limit is on the inclination from horizontal. A surface is self-supporting when
+    /// β ≥ (90° − maxOverhang); it is a genuine overhang when β < (90° − maxOverhang)
+    /// (with maxOverhang = 45° this threshold is 45°, matching the dome design).
+    /// We do NOT alter geometry to chase this number — physics-first stands. We only
+    /// measure it honestly and split the count into inherent-but-expected vs problematic.
     /// </summary>
     public void MeasureOverhang(AeroSpec S, Voxels voxEngine)
     {
-        Library.Log("Measuring overhang angles on final surface...");
+        Library.Log("Measuring overhang angles on final surface (build: spike-tip-down, +Z up)...");
 
         var engineSdf = new ScalarField(voxEngine);
-        int violations = 0;
         int measured = 0;
-        float maxAngle = 0f;
+        int violations = 0;
+        int expected = 0;
+        int problematic = 0;
+        float maxAngleFromHoriz = 90f;          // track the SHALLOWEST (worst) downward face
+        float steepestProblematic = 90f;        // shallowest problematic face = worst actionable case
         float vox = S.voxelSize;
+
+        // Self-support limit on inclination from horizontal: surfaces shallower than
+        // this need support. maxOverhang=45 → 45°.  (β < limit ⇒ overhang violation.)
+        float limitFromHoriz = 90f - S.maxOverhang;
 
         voxEngine.CalculateProperties(out _, out BBox3 bbox);
 
-        // Sample surface points: where SDF is near zero (within 1 voxel of surface)
+        // Axial bands that legitimately carry expected overhangs on a tip-down aerospike:
+        //   - nozzle-exit cowl lip: the shroud trailing edge near zCowl faces partly down.
+        //   - top-flange underside: the mount plate at zInjector overhangs the shroud.
+        // A small axial tolerance (a few mm) brackets each feature band.
+        float band = MathF.Max(4f, 4f * vox);
+        float cowlLipZ = S.zCowl;               // nozzle-exit / cowl trailing edge (low z)
+        float flangeZ  = S.zInjector;           // flange underside (high z)
+        float rShroudMax = MathF.Max(S.rShroudChamber, S.rShroudThroat);
+
+        // Sample surface points: where SDF is near zero (within ~1 voxel of surface)
         for (float z = bbox.vecMin.Z; z <= bbox.vecMax.Z; z += vox * 2f)
         {
             for (float y = bbox.vecMin.Y; y <= bbox.vecMax.Y; y += vox * 2f)
@@ -196,8 +248,8 @@ public sealed class PhysicsFields
                     // Surface = SDF near zero
                     if (MathF.Abs(sdfVal) > 1.5f) continue;
 
-                    // Gradient of SDF = surface normal direction
-                    // Central differences
+                    // Gradient of SDF = OUTWARD surface normal (positive=outside,
+                    // negative=inside solid ⇒ ∇ points solid→air). Central differences.
                     float h = vox * 0.5f;
                     engineSdf.bGetValue(new(x + h, y, z), out float sx1);
                     engineSdf.bGetValue(new(x - h, y, z), out float sx0);
@@ -210,34 +262,80 @@ public sealed class PhysicsFields
                     if (grad.LengthSquared() < 1e-10f) continue;
                     grad = Vector3.Normalize(grad);
 
-                    // Overhang angle: angle between normal and print axis (Z)
-                    // If normal.Z > 0 = upward-facing = OK
-                    // If normal.Z < 0 = downward-facing = check overhang
-                    // Overhang angle from vertical = acos(|normal.Z|)
-                    float angleFromVertical = MathF.Acos(MathF.Abs(grad.Z)) * 180f / MathF.PI;
+                    // Only downward-facing surfaces can overhang during a +Z-up build.
+                    if (grad.Z >= 0f) continue;
 
-                    // Only check downward-facing surfaces
-                    if (grad.Z < 0f)
+                    measured++;
+
+                    // Inclination of the surface from HORIZONTAL (the build plate):
+                    //   β = acos(|n.Z|).  β = 0° → flat ceiling (worst), β = 90° → vertical (best).
+                    float betaFromHoriz = MathF.Acos(MathF.Abs(grad.Z)) * 180f / MathF.PI;
+                    if (betaFromHoriz < maxAngleFromHoriz)
+                        maxAngleFromHoriz = betaFromHoriz;   // shallowest = worst overhang seen
+
+                    if (betaFromHoriz >= limitFromHoriz) continue;  // self-supporting → not a violation
+                    violations++;
+
+                    // Classify the violation: inherent-but-expected (a known feature band
+                    // of a tip-down aerospike) vs truly-problematic (everything else).
+                    float r = MathF.Sqrt(pos.X * pos.X + pos.Y * pos.Y);
+                    bool nearCowlLip   = MathF.Abs(z - cowlLipZ) <= band && r > 0.5f * rShroudMax;
+                    bool nearFlange    = z >= flangeZ - band && r > 0.5f * rShroudMax;
+                    bool isExpected    = nearCowlLip || nearFlange;
+
+                    if (isExpected)
                     {
-                        measured++;
-                        if (angleFromVertical > maxAngle)
-                            maxAngle = angleFromVertical;
-                        if (angleFromVertical > S.maxOverhang)
-                            violations++;
+                        expected++;
+                    }
+                    else
+                    {
+                        problematic++;
+                        if (betaFromHoriz < steepestProblematic)
+                            steepestProblematic = betaFromHoriz;
                     }
                 }
             }
         }
 
         OverhangViolations = violations;
-        OverhangMaxAngle = maxAngle;
+        // Keep the public OverhangMaxAngle meaning "worst overhang severity": report it
+        // as how far the shallowest downward face is BELOW the limit (0 = none worse than
+        // limit). This stays a single comparable scalar for any existing consumer.
+        OverhangMaxAngle = (measured > 0)
+            ? MathF.Max(0f, limitFromHoriz - maxAngleFromHoriz)
+            : 0f;
+        OverhangExpected = expected;
+        OverhangProblematic = problematic;
+        OverhangSteepestProblematicAngle = (problematic > 0) ? steepestProblematic : 90f;
 
+        // ── Honest summary ───────────────────────────────────────────────
+        Library.Log($"  Build orientation: spike-tip-down (+Z up); self-support limit "
+                  + $"{limitFromHoriz:F0}° from horizontal (maxOverhang {S.maxOverhang:F0}°)");
         Library.Log($"  Checked {measured} downward-facing surface points");
-        Library.Log($"  Max overhang: {maxAngle:F1} deg (limit {S.maxOverhang:F0})");
-        if (violations > 0)
-            Library.Log($"  WARNING: {violations} points exceed max overhang angle!");
+        if (measured > 0)
+            Library.Log($"  Shallowest downward face: {maxAngleFromHoriz:F1}° from horizontal "
+                      + $"(≥ {limitFromHoriz:F0}° = self-supporting)");
+        if (violations == 0)
+        {
+            Library.Log("  All downward-facing surfaces are self-supporting at this orientation");
+        }
         else
-            Library.Log($"  All surfaces within overhang limit");
+        {
+            Library.Log($"  {violations} overhang points below the self-support limit, of which:");
+            Library.Log($"    • {expected} INHERENT/EXPECTED — nozzle-exit cowl lip + flange "
+                      + "underside; an aerospike printed tip-down has these by design "
+                      + "(local/minor support, not a geometry defect)");
+            Library.Log($"    • {problematic} PROBLEMATIC — shallow downward faces elsewhere "
+                      + $"(e.g. internal channel roofs, mid-body); steepest {steepestProblematic:F1}° "
+                      + "from horizontal");
+            if (problematic == 0)
+                Library.Log("  → No problematic overhangs: all violations are inherent to the "
+                          + "spike-tip-down orientation. NOT a regression, NOT a geometry defect.");
+            else
+                Library.Log("  → Problematic overhangs are the only actionable ones. Do NOT distort "
+                          + "engine geometry to chase the metric (physics-first); revisit support "
+                          + "strategy or local feature angles instead.");
+        }
     }
 
     private class Visitor : ITraverseScalarField
@@ -292,13 +390,19 @@ public sealed class PhysicsFields
             float sigT = _S.E_mod * _S.alpha_CTE * dT / (1f - _S.nu_poisson);
             _stress.SetValue(pos, (sigH + sigT) / 1e6f);
 
-            // Coolant flow: helical direction near channels
+            // Coolant flow: helical direction near channels.
+            // The channel winds azimuthally at rate _twist (rad of φ per mm of z,
+            // = channelTwistTurns·2π / zTotal). The local helix tangent therefore
+            // has tangential speed (r·_twist) per unit axial advance. Splitting the
+            // (tangential, axial) components by the local pitch makes the swirl
+            // genuinely follow the helix and vary with radius and z, instead of the
+            // old z-independent constant sin/cos(_twist·50).
             float dCh = _ch?.fSignedDistance(pos) ?? 10f;
             if (dCh < 2f)
             {
                 float phi = MathF.Atan2(pos.Y, pos.X);
-                float vT = MathF.Sin(_twist * 50f);
-                float vA = MathF.Cos(_twist * 50f);
+                float vT = r * _twist;   // tangential component ∝ radius × azimuthal rate
+                float vA = 1f;           // axial advance (per unit z)
                 _cool.SetValue(pos, Vector3.Normalize(new(
                     -vT * MathF.Sin(phi),
                      vT * MathF.Cos(phi),

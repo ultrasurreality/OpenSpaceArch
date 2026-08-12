@@ -1,12 +1,14 @@
-// BoundedFloat.cs — Phase 1 of two-layer CSP architecture
+// BoundedFloat.cs — core sampling primitive of the two-layer CSP architecture
 //
-// Placeholder primitive for Phase 2 bounded random sweep. Wraps a scalar
-// parameter with [Min, Max] bounds and a deterministic sampling method
-// via Leap71.ShapeKernel.Uf random helpers.
+// Wraps a scalar parameter with [Min, Max] bounds plus deterministic, seeded
+// sampling via Leap71.ShapeKernel.Uf random helpers. This is the building
+// block of the Phase 2 outer sweep: SweepVariables holds one BoundedFloat per
+// search dimension, and OuterSweep draws an AeroSpec by sampling each one.
 //
-// NOT used in Phase 1 — this file exists so that Phase 2 can start
-// immediately without file-creation churn. Phase 1 only adds live
-// constraint visualization on top of existing EngineValidator.
+// Two sampling modes:
+//   • Sample()         — uniform over [Min, Max]; the default exploratory sweep.
+//   • SampleGaussian()  — clamped Gaussian centered in the range; the optional
+//                         center-biased refinement mode (OuterSweep.Config.CenterBiased).
 //
 // See ARCHITECTURE.md for rationale.
 

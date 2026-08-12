@@ -6,8 +6,13 @@
 // generation, only shows where the current spec sits relative to every
 // physics/manufacturing constraint boundary.
 //
-// Instantiated once in AppMain, drawn every frame, receives a fresh Viability
-// each frame from AppMain's UpdatePreviewProfiles hook.
+// Instantiated once in AppMain and Draw()n every frame, but the Viability it
+// renders is NOT recomputed every frame. AppMain.UpdatePreviewProfiles early-
+// returns when the parameter hash is unchanged (F_thrust, Pc, O/F, voxel,
+// channelMode, CR, L*, SF), so EngineValidator.Check + _liveViability only
+// refresh when a slider actually moves a tracked parameter. Between changes
+// this panel redraws the SAME cached Viability — it is reactive to edits, not
+// per-frame live. (Parameters outside that hash, e.g. twist, won't refresh it.)
 //
 // See ARCHITECTURE.md phase 1.
 

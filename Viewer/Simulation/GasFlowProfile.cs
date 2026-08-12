@@ -13,8 +13,11 @@
 //
 // Aerospike note: the "exit" of an aerospike is at the spike tip. We treat the
 // region between throat and tip as the supersonic expansion, using the shroud
-// as the outer streamline (slip boundary in vacuum). Past the tip, the gas
-// continues with Ve from isentropic expansion at A_exit / A*.
+// as the outer streamline (slip boundary in vacuum). Compute() only samples the
+// gas path between zTip and zInjector — it does NOT extend past the tip. For
+// z at or below the tip, Sample() clamps to the tip station value, and the
+// particle plume past the tip is handled separately by ParticleSystem with a
+// crude fixed radial divergence (not an isentropic A_exit/A* expansion here).
 
 using OpenSpaceArch.Engine;
 

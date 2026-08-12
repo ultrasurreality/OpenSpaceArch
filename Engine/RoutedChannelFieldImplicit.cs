@@ -1,9 +1,20 @@
-// RoutedChannelFieldImplicit.cs — v5b: IImplicit for surface-routed channels
+// RoutedChannelFieldImplicit.cs — v5b: IImplicit for routed cooling channels
 //
-// Like ChannelFieldImplicit but works with arbitrary spine paths from SurfaceTurtle,
-// not just helical spines. Uses spatial grid for nearest-segment search.
+// THE ACTIVE CHANNEL FIELD. FluidFirst.BuildChannelVoids voxelizes this for both
+// shroud and spike (mirroring Program.cs). Unlike ChannelFieldImplicit (which assumes
+// perfect 2π/N helical symmetry and unwraps analytically), this works with arbitrary
+// spine paths and uses a spatial grid for nearest-segment search.
 //
-// Trade-off: O(1) helix unwrap → O(~1) grid lookup. Slightly slower but works on ANY surface.
+// Spines come from ChannelRouter's ANALYTICAL helices (not SurfaceTurtle — that class
+// is retained for reference only). The grid lookup means it also tolerates any routed
+// path, should a future router emit non-helical spines.
+//
+// Cross-section per voxel: superellipse with print-angle-adaptive exponent, spatial
+// θ-modulation of radial half-height, and smoothstep-faded turbulator ribs. All of
+// these are CONTINUOUS functions of position — no per-channel step functions — so the
+// rendered void stays watertight.
+//
+// Trade-off: O(1) helix unwrap → O(~1) grid lookup. Slightly slower but path-agnostic.
 
 using System.Numerics;
 using PicoGK;
@@ -18,14 +29,13 @@ public class RoutedChannelFieldImplicit : IImplicit
     // All spine segments across all channels
     readonly Vector3[] _segA;   // segment start points
     readonly Vector3[] _segB;   // segment end points
-    readonly float[] _segZ;     // average z of segment (for physics lookup)
-    readonly int[] _segSpineIdx;// which spine (channel) each segment belongs to
     readonly int _nSegments;
-    readonly int _nSpines;
 
-    // Per-channel multipliers (symmetry-breaking)
-    readonly float[] _widthMult;  // [_nSpines]: per-channel random multiplier on halfW/halfH
-    readonly float[] _thetaMod;   // [_nSpines]: sinusoidal θ-modulation factor on halfH
+    // NOTE: θ-modulation and width variation are applied as CONTINUOUS spatial
+    // functions of voxel position inside fSignedDistance (see thetaMod below),
+    // NOT as per-channel arrays. Per-channel multipliers were removed because a
+    // per-spine step function in a distance field is discontinuous at spine
+    // boundaries and breaks watertight marching cubes (the project's #1 failure mode).
 
     // Spatial grid for fast nearest-segment lookup
     readonly int _gridX, _gridY, _gridZ;
@@ -41,6 +51,29 @@ public class RoutedChannelFieldImplicit : IImplicit
     readonly float _zStart, _zEnd, _zStep;
     readonly float _ribPitch, _ribHeight, _minHalfH;
 
+    // Dome-skin guard: the channel cross-section is tapered continuously to ZERO over
+    // [_zTaperStart, _zChTop] so the void cannot bulge up into the injector dome and
+    // breach the outer skin where the engine radius is largest (the G3-thinwall fix).
+    // Spines already end at zChTop (ChannelRouter), but the superellipse half-extents
+    // would otherwise keep a finite blob at the top spine point — exactly the dome-base
+    // pinch that fragmented the shell. The taper is a smoothstep of voxel position
+    // (nearestZ), so fSignedDistance stays CONTINUOUS.
+    readonly float _zChTop;
+    readonly float _zTaperStart;
+
+    // Throat-wall guard (G3-thinwall v2): the throat is the thinnest annulus and the
+    // densest-channel region, so the channel cross-section + θ-modulation can leave ZERO
+    // printable wall between the void and EITHER the hot-gas surface OR the outer skin
+    // there (headless reported min wall 0.00 mm at the throat band). Inside a band around
+    // zThroat we (a) fade the θ-modulation bulge toward 1.0 so the channel does not balloon
+    // radially into the thin inner wall, and (b) hard-cap the radial half-height to the
+    // local annulus budget so that >= minPrintWall always remains on BOTH sides. Both are
+    // CONTINUOUS spatial functions of nearestZ (smoothstep envelope), so fSignedDistance
+    // stays watertight. We do NOT delete channels here — cooling is needed most at the
+    // throat; we only bound their cross-section so a wall survives.
+    readonly float _zThroat;
+    readonly float _throatBandHalf;     // mm — half-width of the guard band around zThroat
+
     // Bounding box
     float _bboxMinX, _bboxMinY, _bboxMinZ;
     float _bboxMaxX, _bboxMaxY, _bboxMaxZ;
@@ -54,50 +87,23 @@ public class RoutedChannelFieldImplicit : IImplicit
         _minHalfH = S.minChannel / 2f;
 
         var spines = route.Spines;
-        _nSpines = spines.Count;
 
-        // Collect all segments, tracking which spine (channel) each belongs to
+        // Collect all spine segments (flattened across all channels).
         var segAList = new List<Vector3>();
         var segBList = new List<Vector3>();
-        var segZList = new List<float>();
-        var segSpineList = new List<int>();
 
-        int spineIdx = 0;
         foreach (var spine in spines)
         {
             for (int i = 0; i < spine.Count - 1; i++)
             {
                 segAList.Add(spine[i]);
                 segBList.Add(spine[i + 1]);
-                segZList.Add((spine[i].Z + spine[i + 1].Z) / 2f);
-                segSpineList.Add(spineIdx);
             }
-            spineIdx++;
         }
 
         _segA = segAList.ToArray();
         _segB = segBList.ToArray();
-        _segZ = segZList.ToArray();
-        _segSpineIdx = segSpineList.ToArray();
         _nSegments = _segA.Length;
-
-        // Pre-compute per-channel multipliers (symmetry-breaking L3):
-        //  - widthMult: random ±jitter — gives each channel its own "personality" (individual thickness)
-        //  - thetaMod:  sinusoidal cos(harmonic · phi_i) — correlated azimuthal bulge
-        //               coherent with fuel inlet at phi=0° and LOX inlet at phi=180° (harmonic=2)
-        //
-        // Seed for width axis is derived from isShroud so shroud and spike differ.
-        int widthSeed = S.channelSeed + (isShroud ? 0 : ChannelRouter.SPIKE_SEED_OFFSET);
-        _widthMult = new float[_nSpines];
-        _thetaMod  = new float[_nSpines];
-        for (int s = 0; s < _nSpines; s++)
-        {
-            _widthMult[s] = 1f + S.perChannelWidthJitterFraction
-                              * ChannelRouter.DetRand(widthSeed, s, ChannelRouter.AXIS_WIDTH);
-            float phi = (s < route.Phases.Length) ? route.Phases[s] : 0f;
-            _thetaMod[s]  = 1f + S.heatFluxAngularAmplitude
-                              * MathF.Cos(S.heatFluxAngularHarmonic * phi);
-        }
 
         // Bounding box from segments
         _bboxMinX = _bboxMinY = _bboxMinZ = float.MaxValue;
@@ -159,6 +165,21 @@ public class RoutedChannelFieldImplicit : IImplicit
         float fadeLen = MathF.Max((_zEnd - _zStart) * 0.08f, 5f);
         float manifoldHalf = S.manifoldRadius * 0.8f;
 
+        // Dome-skin guard band: taper the channel cross-section to zero as the spine
+        // approaches zChTop. Band width = max(fadeLen, 6 mm) so the shrink is gradual
+        // (continuous) yet complete before the dome base. The collector manifold is added
+        // separately (FluidFirst.BuildShroudCollector), so the channel field itself does
+        // NOT need to keep a finite blob at the top.
+        _zChTop = S.zChTop;
+        _zTaperStart = _zChTop - MathF.Max(fadeLen, 6f);
+
+        // Throat guard band: span ±throatBandHalf around zThroat. Width is scaled to the
+        // convergent geometry (a few mm either side of the throat) and floored at 4 mm so
+        // the cap is gradual. The band must comfortably contain the headless failure point
+        // (~z=26, zThroat≈24.5) and the densest-channel convergent region just above it.
+        _zThroat = S.zThroat;
+        _throatBandHalf = MathF.Max(0.25f * S.convergentDz, 4f);
+
         for (int i = 0; i < _nSamples; i++)
         {
             float z = _zStart + i * _zStep;
@@ -176,17 +197,80 @@ public class RoutedChannelFieldImplicit : IImplicit
                 halfH = h / 2f;
             }
 
-            // Fade transitions: channels merge with collectors at edges
+            // Fade-IN at the inlet edge: channels emerge from the inlet collector.
             float fadeIn = Smoothstep(_zStart, _zStart + fadeLen, z);
-            float fadeOut = Smoothstep(_zEnd, _zEnd - fadeLen, z);
-            float fade = fadeIn * fadeOut;
-            halfW = manifoldHalf + (halfW - manifoldHalf) * fade;
-            halfH = manifoldHalf + (halfH - manifoldHalf) * fade;
+            halfW = manifoldHalf + (halfW - manifoldHalf) * fadeIn;
+            halfH = manifoldHalf + (halfH - manifoldHalf) * fadeIn;
+
+            // Fade-OUT at the top edge tapers all the way to ZERO (not manifoldHalf) so the
+            // void closes before the dome — prevents the dome-base skin breach (G3-thinwall).
+            // (The continuous spatial taper on nearestZ in fSignedDistance is the primary
+            // guard; this pre-sample fade keeps the sampled extents consistent with it.)
+            float topClose = Smoothstep(_zChTop, _zTaperStart, z); // 1 below taper, 0 at zChTop
+            halfW *= topClose;
+            halfH *= topClose;
+
+            // Throat radial-budget cap (G3-thinwall v2): in the throat band, the annular gas
+            // gap is the thinnest in the engine, so the RADIAL channel half-height must leave
+            // >= minPrintWall to BOTH the gas surface and the outer skin. The router places the
+            // spine center at rShroud + wall + h/2 (or, on the spike, rSpike - wall - h/2);
+            // the remaining radial room before the channel touches the gas side is therefore
+            // (wall - minPrintWall) on the inner side. The cap clamps the SAMPLED halfH so the
+            // channel cannot eat that margin even before θ-modulation is applied. It is blended
+            // by the SAME throat-band envelope used per-voxel in fSignedDistance, so (1) it only
+            // affects the throat band — channels keep full size in the chamber — and (2) the
+            // pre-sampled extents stay consistent with the per-voxel guard so the two never
+            // disagree. Blending min(halfH,capH) by the envelope is continuous in z.
+            float bandEnv = ThroatBandEnvelope(z);
+            if (bandEnv > 0f)
+            {
+                float capH = ThroatHalfHCap(S, z, isShroud);
+                float cappedH = MathF.Min(halfH, capH);
+                halfH = halfH + (cappedH - halfH) * bandEnv;
+            }
 
             _halfW[i] = halfW;
             _halfH[i] = halfH;
             _superN[i] = 2.5f;
         }
+    }
+
+    /// Maximum printable RADIAL half-height for a cooling channel at axial station z,
+    /// such that >= minPrintWall remains between the channel void and the hot-gas surface.
+    /// Returns a large value (no cap) outside the throat band. CONTINUOUS in z (the band
+    /// edges are blended by the smoothstep envelope applied at the call site / in
+    /// fSignedDistance), so it does not introduce an SDF step. The skin-side wall is grown
+    /// separately by VariableWallImplicit and is always >= minPrintWall; this cap protects
+    /// the GAS side, which mutual-exclusion only guarantees for the un-bulged cross-section.
+    static float ThroatHalfHCap(AeroSpec S, float z, bool isShroud)
+    {
+        // The wall(z) Barlow thickness IS the nominal gas-side gap the router reserved.
+        // Keep >= minPrintWall of it as solid metal: the channel may use at most
+        // (wall - minPrintWall) of radial room on the inner side before the spine center,
+        // i.e. halfH <= wall - minPrintWall. Floor at a small positive value so the channel
+        // never fully closes inside the band (cooling is needed most at the throat).
+        float wall = HeatTransfer.WallThickness(S, z);
+        float cap = wall - S.minPrintWall;
+        // Never cap below the powder-removal minimum half-height, and never below a hard
+        // floor of half the min channel — a throat channel must still pass coolant.
+        float floor = MathF.Max(S.minChannel / 2f, 0.5f);
+        return MathF.Max(cap, floor);
+    }
+
+    /// Smooth "tent" envelope centred on the throat: 1.0 inside the band core, ramping
+    /// continuously to 0.0 at z = zThroat ± throatBandHalf and staying 0 beyond. Built from
+    /// two opposing smoothsteps so it is C1-continuous everywhere — no SDF step. Used to blend
+    /// the θ-modulation fade and the radial cap in/out of the throat region. An inner flat
+    /// core (60% of the half-band) keeps the cap fully active across the thinnest annulus,
+    /// while the outer 40% ramps the guard out gradually toward the chamber/convergent.
+    float ThroatBandEnvelope(float z)
+    {
+        float d = MathF.Abs(z - _zThroat);
+        if (d >= _throatBandHalf) return 0f;
+        float core = 0.6f * _throatBandHalf;      // fully-on region |z-zThroat| <= core
+        if (d <= core) return 1f;
+        // Ramp from 1 (at core) down to 0 (at band edge), continuous at both ends.
+        return Smoothstep(_throatBandHalf, core, d);
     }
 
     int CellX(float x) => Math.Clamp((int)((x - _gridMinX) / _cellSize), 0, _gridX - 1);
@@ -219,7 +303,6 @@ public class RoutedChannelFieldImplicit : IImplicit
         float nearestZ = v.Z;
         Vector3 nearestClosest = v;
         Vector3 nearestTangent = Vector3.UnitZ;
-        int nearestSpineIdx = 0;
 
         var candidates = _grid[cellIdx];
         for (int c = 0; c < candidates.Count; c++)
@@ -236,7 +319,6 @@ public class RoutedChannelFieldImplicit : IImplicit
                 nearestZ = closest.Z;
                 nearestClosest = closest;
                 nearestTangent = ab;
-                nearestSpineIdx = _segSpineIdx[segIdx];
             }
         }
 
@@ -279,13 +361,40 @@ public class RoutedChannelFieldImplicit : IImplicit
         // break marching cubes. Per-channel width jitter is intentionally omitted because it
         // is fundamentally discontinuous (step function at spine boundaries breaks watertight).
         float phiVoxel = MathF.Atan2(v.Y, v.X);
-        float thetaMod = 1f + _S.heatFluxAngularAmplitude
+        // θ-modulation bulge — faded toward 1.0 inside the throat band. The bipolar bulge
+        // (amplitude up to heatFluxAngularAmplitude) is what eats the thin inner wall where
+        // the annulus is tightest; throatFade (1 at the throat → 0 outside the band) scales
+        // the DEVIATION from 1, not the channel itself, so cooling cross-section is preserved
+        // away from the throat. Smoothstep envelope ⇒ CONTINUOUS, no SDF step.
+        float throatFade = ThroatBandEnvelope(nearestZ);         // 1 in the band core → 0 outside
+        float thetaDev = _S.heatFluxAngularAmplitude
                             * MathF.Cos(_S.heatFluxAngularHarmonic * phiVoxel);
+        float thetaMod = 1f + thetaDev * (1f - throatFade);
         float halfW = Lerp(_halfW, nearestZ);                    // tangential half-width
         float halfH = Lerp(_halfH, nearestZ) * thetaMod;         // radial half-height (θ-modulated by position)
         float n = Lerp(_superN, nearestZ);
 
-        // Turbulator ribs
+        // Throat radial-budget cap (G3-thinwall v2), re-applied per voxel AFTER θ-modulation
+        // so the bulge can never push the channel back past the gas-side wall budget. The cap
+        // is blended in over the band by throatFade, so outside the throat it is a no-op and
+        // the field stays continuous. capH already accounts for wall(z) - minPrintWall.
+        if (throatFade > 0f)
+        {
+            float capH = ThroatHalfHCap(_S, nearestZ, _isShroud);
+            float cappedH = MathF.Min(halfH, capH);
+            halfH = halfH + (cappedH - halfH) * throatFade;      // = capH only at band core
+        }
+
+        // Dome-skin taper (G3-thinwall): continuous shrink of the cross-section to ZERO
+        // over [_zTaperStart, _zChTop], evaluated on the spine z. Smoothstep → C1-continuous,
+        // so the distance field stays watertight. This closes the channel void before the
+        // injector dome so it cannot breach the outer skin at the largest engine radius.
+        float topTaper = Smoothstep(_zChTop, _zTaperStart, nearestZ); // 1 below taper, 0 at zChTop
+        halfW *= topTaper;
+        halfH *= topTaper;
+
+        // Turbulator ribs. The rib floor must follow the taper (scale _minHalfH by topTaper)
+        // so a fully-closed channel near the dome is NOT re-inflated back up to _minHalfH.
         float arcLen = nearestZ - _zStart;
         float ribPhase = arcLen % _ribPitch;
         if (ribPhase < 0f) ribPhase += _ribPitch;
@@ -293,7 +402,7 @@ public class RoutedChannelFieldImplicit : IImplicit
         {
             float edge = Smoothstep(0f, 0.05f, ribPhase / _ribPitch)
                        * Smoothstep(0.25f, 0.20f, ribPhase / _ribPitch);
-            halfH = MathF.Max(halfH - _ribHeight / 2f * edge, _minHalfH);
+            halfH = MathF.Max(halfH - _ribHeight / 2f * edge * topTaper, _minHalfH * topTaper);
         }
 
         // SuperellipseSDF with proper local decomposition

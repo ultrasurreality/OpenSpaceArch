@@ -39,6 +39,33 @@ public sealed class SweepPanel
     private bool _uiFoldConfig = true;
     private bool _uiFoldWeights = true;
 
+    // ── Pareto-front overlay state ──
+    // The scatter normally colors points by the *scalarized* weighted score.
+    // This overlay surfaces the genuinely non-dominated set (max Isp · min mass
+    // · min σ_thermal) computed by DesignSweep.ParetoFront — the honest
+    // trade-off surface, with no weighting collapsing the choices. It is purely
+    // additive: the score gradient and the yellow best-by-weights ring stay.
+    private bool _showPareto = true;
+    // false = OVERLAY (mark Pareto points, keep the rest visible);
+    // true  = FILTER (dim everything not on the front so only trade-offs show).
+    private bool _paretoFilter;
+
+    // Indices into _results that are on the current Pareto front. Cached and
+    // only recomputed when the result set changes (tracked by _resultsVersion),
+    // so the O(n²) front is not rebuilt every render frame. The Pareto set
+    // depends ONLY on raw objectives (Isp/mass/σ_th), never on the live weight
+    // sliders, so weight changes do not invalidate it.
+    private readonly HashSet<int> _paretoIdx = new();
+    private int _resultsVersion;       // bumped whenever _results is replaced
+    private int _paretoBuiltForVersion = -1;
+
+    // True when the currently-loaded results came from PymooSweep.py
+    // (a numpy PORT of the C# physics — reconciled but still non-authoritative,
+    // since a port can drift and it pins thrust / skips voxel + spatial checks)
+    // rather than the authoritative C# OuterSweep.
+    // Drives the NON-AUTHORITATIVE warning banner in DrawHeader().
+    private bool _lastSweepFromPymoo;
+
     /// <summary>
     /// Wired in AppMain to <c>_controlPanel.ApplyFromSpec</c>. When the user
     /// clicks "Apply Best" the panel invokes this with the winning spec,
@@ -57,16 +84,13 @@ public sealed class SweepPanel
         _cfg.FixedVoxel = fixedVoxel;
     }
 
-    public void Draw()
-    {
-        ImGui.SetNextWindowPos(new Vector2(1268, 600), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSize(new Vector2(332, 296), ImGuiCond.FirstUseEver);
-        ImGui.Begin("Design Space Sweep");
-        DrawContent();
-        ImGui.End();
-    }
-
-    /// <summary>Draws all sweep content without Begin/End — for embedding in another panel.</summary>
+    /// <summary>
+    /// Draws all sweep content without Begin/End — for embedding in another
+    /// panel. This is the only entry point; the panel is hosted inside
+    /// ControlPanel's Search tab (see ControlPanel.DrawContent → SweepPanel.DrawContent).
+    /// The former standalone Draw() (own Begin/End at fixed pos 1268,600) was
+    /// removed in v7 — it was orphaned once the panel moved into the Search tab.
+    /// </summary>
     public void DrawContent()
     {
         DrawHeader();
@@ -104,6 +128,30 @@ public sealed class SweepPanel
         ImGui.SameLine();
         if (hasResults)
             ImGui.TextDisabled($"{_lastSweepMs}ms {_results.Count} pts");
+
+        // ── NON-AUTHORITATIVE-physics warning for the pymoo path ──
+        // PymooSweep.py is a numpy PORT of the C# silent physics
+        // (DesignSweep.ComputeSilent — the path OuterSweep runs). As of the
+        // 2026-06-03 [pymoo-unify] reconciliation its constants and formulas
+        // (full Bartz with Cp_transport/Pr^0.6/throat-curvature, film cooling,
+        // annular sizing, the C# mass formula, g0=9.80665) match the C# source.
+        // It is still NON-AUTHORITATIVE: a port can silently drift from the C#
+        // if one side is edited, thrust is pinned at 5 kN, and it skips the
+        // Pc-correction, voxel mass, and SpatialValidator. Its NSGA-III Pareto
+        // front is a design-space EXPLORATION aid, NOT the authoritative engine
+        // result. The "Quick" sweep runs the real OuterSweep (C# physics). Keep
+        // this banner so a user never mistakes pymoo numbers for validated output.
+        if (_lastSweepFromPymoo)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.78f, 0.25f, 1f));
+            ImGui.TextWrapped(
+                "⚠ pymoo results are NON-AUTHORITATIVE: numpy port of the C# " +
+                "physics (reconciled constants/Bartz/film/mass), but a port can " +
+                "drift, thrust is pinned at 5 kN, and Pc-correction / voxel mass / " +
+                "spatial checks are skipped. Use for exploration only; re-run " +
+                "\"Quick\" + Apply Best for validated values.");
+            ImGui.PopStyleColor();
+        }
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -167,6 +215,52 @@ public sealed class SweepPanel
         }
 
         ImGui.Text($"N={total} · valid {valid} ({100f * valid / total:F0}%) · best {bestScore:F3}");
+
+        // Pareto front size — the count of genuinely non-dominated trade-offs,
+        // independent of the weight sliders. Shown only when the overlay is on.
+        if (_showPareto)
+        {
+            RecomputeParetoIfNeeded();
+            ImGui.SameLine();
+            ImGui.TextDisabled($"· Pareto {_paretoIdx.Count}");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Pareto front: cache the non-dominated index set
+    // ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Rebuilds <see cref="_paretoIdx"/> from the current results, but only when
+    /// the result set actually changed (<see cref="_resultsVersion"/>). Reuses
+    /// the ONE shared domination kernel in
+    /// <see cref="DesignSweep.ParetoFront{T}(IEnumerable{T}, System.Func{T, ValueTuple{float, float, float}})"/>
+    /// so the viewer's notion of "non-dominated" is identical to the headless
+    /// <c>--sweep</c> front. We feed it the result *indices* and project each one
+    /// to its (max Isp · min mass · min σ_th) objectives, so the returned list is
+    /// exactly the indices that survive. Invalid / failed-physics rows carry
+    /// Isp ≤ 0 or mass ≤ 0 and are dropped by the kernel's degeneracy filter.
+    /// </summary>
+    private void RecomputeParetoIfNeeded()
+    {
+        if (_paretoBuiltForVersion == _resultsVersion) return;
+        _paretoBuiltForVersion = _resultsVersion;
+
+        _paretoIdx.Clear();
+        var indices = Enumerable.Range(0, _results.Count);
+        var front = DesignSweep.ParetoFront(
+            indices,
+            i =>
+            {
+                var r = _results[i];
+                // Only valid samples are eligible for the trade-off surface;
+                // mark the rest degenerate so the kernel filters them out.
+                if (!r.Valid) return (0f, 0f, 0f);
+                return (r.Isp_SL, r.MassEstimate_kg, r.SigmaThermal_MPa);
+            });
+
+        foreach (int i in front)
+            _paretoIdx.Add(i);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -175,6 +269,21 @@ public sealed class SweepPanel
 
     private void DrawScatterPlot()
     {
+        // ── Pareto overlay controls ──
+        // A toggle, distinct from the weighted-score coloring, that surfaces the
+        // genuinely non-dominated set. "Filter" dims everything off the front so
+        // only the real trade-offs remain on screen.
+        ImGui.Checkbox("Pareto front", ref _showPareto);
+        if (_showPareto)
+        {
+            ImGui.SameLine();
+            ImGui.Checkbox("filter", ref _paretoFilter);
+            ImGui.SameLine();
+            ImGui.TextDisabled("(max Isp · min mass · min σ)");
+        }
+
+        if (_showPareto) RecomputeParetoIfNeeded();
+
         // Fixed axis ranges so the plot is stable across sweeps
         const float ispMin = 250f;
         const float ispMax = 340f;
@@ -224,11 +333,21 @@ public sealed class SweepPanel
             if (s > bestScore) { bestScore = s; bestIdx = i; }
         }
 
+        // Cyan, used to mark non-dominated (Pareto) points — deliberately a hue
+        // the red→yellow→green score gradient never produces, so the trade-off
+        // surface reads as a separate layer from the scalarized score.
+        uint paretoColor = ImGui.GetColorU32(new Vector4(0.15f, 0.85f, 0.95f, 1f));
+
         // Draw each sample
         for (int i = 0; i < _results.Count; i++)
         {
             var r = _results[i];
             if (r.Isp_SL <= 0f || r.MassEstimate_kg <= 0f) continue;
+
+            bool onPareto = _showPareto && _paretoIdx.Contains(i);
+
+            // Filter mode: hide everything off the front (keep Pareto points).
+            if (_showPareto && _paretoFilter && !onPareto) continue;
 
             float xFrac = Math.Clamp((r.Isp_SL - ispMin) / (ispMax - ispMin), 0f, 1f);
             float yFrac = Math.Clamp((r.MassEstimate_kg - massMin) / (massMax - massMin), 0f, 1f);
@@ -248,6 +367,13 @@ public sealed class SweepPanel
                 dotColor = ScoreToColor(score);
                 drawList.AddCircleFilled(new Vector2(px, py), 2.5f, dotColor);
             }
+
+            // Overlay marker: ring the non-dominated points in cyan. Drawn over
+            // the score-colored fill so both readings coexist — fill = weighted
+            // score, ring = "this is a genuine trade-off, nobody beats it on all
+            // three objectives".
+            if (onPareto)
+                drawList.AddCircle(new Vector2(px, py), 4f, paretoColor, 12, 1.5f);
         }
 
         // Best sample highlight — draw LAST so it's on top
@@ -332,6 +458,8 @@ public sealed class SweepPanel
         _results = OuterSweep.Run(_cfg);
         sw.Stop();
         _lastSweepMs = sw.ElapsedMilliseconds;
+        _lastSweepFromPymoo = false; // authoritative C# physics
+        _resultsVersion++;           // invalidate cached Pareto front
     }
 
     private void RunPymoo()
@@ -412,6 +540,8 @@ public sealed class SweepPanel
                     NChannels: 0));
             }
 
+            _lastSweepFromPymoo = true; // numpy port of C# physics (non-authoritative) — flag the banner
+            _resultsVersion++;          // invalidate cached Pareto front
             Console.WriteLine($"[pymoo] Loaded {_results.Count} Pareto solutions from {path}");
         }
         catch (Exception ex)

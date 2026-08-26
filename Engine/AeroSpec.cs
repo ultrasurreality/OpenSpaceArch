@@ -59,14 +59,25 @@ public class AeroSpec
     public float phaseDistributionExponent     = 1f;    // 1.0 = full golden ratio phyllotaxis, 0.0 = uniform + jitter
 
     // Manufacturing constraints (LPBF)
-    // voxelSize 0.4 mm is the HEADLESS/BUILD resolution (fits ~5 GB RAM, used by
-    // the batch STL generation path). The interactive viewer/UI deliberately
-    // defaults to a different (finer or coarser) resolution for previewing —
-    // that divergence is intentional, do NOT "sync" them by editing this value.
-    public float voxelSize   = 0.4f;        // mm — voxel resolution (headless/build default)
+    //
+    // voxelSize is the HEADLESS/BUILD resolution (batch STL path). The interactive viewer/UI
+    // deliberately runs a coarser grid for responsiveness — that divergence is intentional,
+    // do NOT "sync" them by editing this value.
+    //
+    // MEASURED 2026-08-12 on 64 GB (headless, Pc=110 bar), peak RSS / wall-clock / voxel mass:
+    //   0.4 mm →  2.59 GB /  16 s / 1.048 kg      (the old default; NOT ~5 GB as previously claimed)
+    //   0.3 mm →  5.36 GB /  36 s / 0.940 kg      ← current default
+    //   0.25mm →  9.61 GB /  65 s / 0.931 kg
+    //   0.2 mm → 16.83 GB / 162 s / 0.888 kg      (practical maximum; 0.15 mm ≈ 37 GB extrapolated)
+    // Memory scales as voxel^-2.7. Voxel mass has NOT converged even at 0.2 mm (0.4→0.2 spans
+    // -15.3%), so voxel mass/T-W are grid-dependent numbers — never compare across resolutions.
+    // Why 0.4 was too coarse: the throat wall is 1.01 mm, i.e. only 2.5 voxels across. Note that
+    // EngineValidator C12 (voxel < throatGap/2) does NOT catch this — the annular gap is 3.07 mm,
+    // so C12 would happily allow 1.5 mm. Resolution must be judged against the WALL, not the gap.
+    public float voxelSize   = 0.3f;        // mm — voxel resolution (headless/build default)
     public float minPrintWall = 0.5f;       // mm — LPBF minimum wall
     public float minChannel   = 1.0f;       // mm — minimum channel diameter for powder removal
-    public float minRibWall  = 1.2f;       // mm — min wall between channels (≥3 voxels at 0.4mm)
+    public float minRibWall  = 1.2f;       // mm — min wall between channels (4 voxels at 0.3mm)
     public float maxOverhang  = 45f;        // degrees — LPBF self-supporting angle
 
     // Turbulator ribs (inside channels, increase heat transfer 2-3×)

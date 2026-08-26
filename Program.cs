@@ -29,11 +29,11 @@ class Program
             switch (args[0].ToLowerInvariant())
             {
                 case "--physics": PhysicsOnly(); return;
-                // 0.4 mm is the FINEST of the three voxel defaults and matches
-                // AeroSpec.voxelSize (the batch-STL resolution). The interactive
-                // viewer (AppMain) runs a coarser 0.5 mm core grid for responsiveness;
-                // these are intentionally different — see comments in AppMain/ControlPanel.
-                case "--headless": BuildEngineHeadless(0.4f); return;
+                // Default comes from AeroSpec.voxelSize (0.3 mm since 2026-08-12, was 0.4) so the
+                // batch-STL resolution lives in exactly one place. Override per run:
+                // `--headless 0.2`. The interactive viewer (AppMain) runs a coarser 0.5 mm core
+                // grid for responsiveness — intentionally different, see AppMain/ControlPanel.
+                case "--headless": BuildEngineHeadless(ParseVoxelArg(args, new AeroSpec().voxelSize)); return;
                 case "--sweep": DesignSweep.Run(); return;
                 case "--single":
                     Console.WriteLine("\n── Single Variant: Physics + Spatial ──\n");
@@ -44,6 +44,21 @@ class Program
 
         // Default: cinematic viewer — all controls live inside the window
         OpenSpaceArch.Viewer.AppMain.Run();
+    }
+
+    /// <summary>
+    /// Optional voxel-size override: `--headless 0.25`. Omitted → AeroSpec.voxelSize default (0.4 mm).
+    /// Parsed with InvariantCulture on purpose: the machine locale uses a comma decimal separator,
+    /// so "0.25" would otherwise silently parse as 25 and blow up the grid.
+    /// </summary>
+    static float ParseVoxelArg(string[] args, float fallback)
+    {
+        if (args.Length > 1 &&
+            float.TryParse(args[1], System.Globalization.NumberStyles.Float,
+                           System.Globalization.CultureInfo.InvariantCulture, out float mm) &&
+            mm > 0.05f && mm <= 2.0f)
+            return mm;
+        return fallback;
     }
 
     static void PhysicsOnly()
@@ -74,6 +89,7 @@ class Program
 
             // ── STEP 1-3: Pure physics (zero geometry) ──
             AeroSpec spec = new AeroSpec();
+            spec.voxelSize = voxelSize;   // keep spec in sync with the actual PicoGK grid
             Thermochemistry.Compute(spec);
             ChamberSizing.Compute(spec);
             HeatTransfer.Compute(spec);

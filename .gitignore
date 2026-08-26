@@ -31,3 +31,12 @@ desktop.ini
 # Python temp
 __pycache__/
 *.pyc
+
+# Generated run artifacts (exports, sweep dumps, analysis reports)
+pareto_results*.json
+*_analysis.txt
+*_spec.json
+
+# Local launchers / shortcuts
+_LAUNCH_*
+*.lnk

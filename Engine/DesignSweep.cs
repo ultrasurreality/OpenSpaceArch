@@ -1,10 +1,28 @@
-// DesignSweep.cs — Перебор вариантов без вокселей
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Чистая математика: физика + валидация + ранжирование
-// 1000 вариантов за ~1 секунду
+// OpenSpaceArch — Open Computational Architecture for Aerospace Hardware
+// Copyright (C) 2025-2026 ultrasurreality
 //
-// Использование: dotnet run -- sweep
-// Или из кода: DesignSweep.Run()
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+// DesignSweep.cs — Voxel-free enumeration of design variants
+//
+// Pure math: physics + validation + ranking
+// 1000 variants in ~1 second
+//
+// Usage: dotnet run -- sweep
+// Or from code: DesignSweep.Run()
 
 using System.Diagnostics;
 using OpenSpaceArch.Engine.CSP;
@@ -13,7 +31,7 @@ namespace OpenSpaceArch.Engine;
 
 public static class DesignSweep
 {
-    // Результат одного варианта
+    // Result of a single variant
     public record DesignResult(
         float Thrust,       // N
         float Pc_bar,       // bar
@@ -25,17 +43,17 @@ public static class DesignSweep
         float Isp_vac,      // s
         float mDot,         // kg/s
         float TotalLength,  // mm
-        float MassEstimate, // kg (грубая оценка без вокселей)
+        float MassEstimate, // kg (rough estimate, no voxels)
         float TWRatio,      // thrust / (mass * g)
         float qThroat_MW,   // MW/m²
         float wallThroat,   // mm
         float chRadiusMin,  // mm
         float nChannels,    // shroud
-        float vCoolMax,     // m/s (итоговая после self-iteration)
+        float vCoolMax,     // m/s (final value after self-iteration)
         float sigma_thermal,// MPa
         float Score,        // weighted composite score (0-1, higher = better)
-        bool  IsValid,      // прошёл все проверки
-        string Errors        // что не так
+        bool  IsValid,      // passed every check
+        string Errors        // what went wrong
     );
 
     // Default scoring preset for the grid sweep. The grid sweep is fixed-weight
@@ -52,7 +70,7 @@ public static class DesignSweep
     static float ComputeScore(AeroSpec S, float sigma_th_MPa, int spatialConflicts) =>
         EngineEvaluation.Score(_gridWeights, S, sigma_th_MPa, spatialConflicts);
 
-    // Валидация одного варианта
+    // Validate a single variant
     static DesignResult Evaluate(float thrust, float pc_bar, float of_ratio, float sf, float twist, float cr)
     {
         var S = new AeroSpec
@@ -63,12 +81,12 @@ public static class DesignSweep
             SF = sf,
             channelTwistTurns = twist,
             CR = cr,
-            minRibWall = 0.5f  // реальный LPBF min, не 3×voxel
+            minRibWall = 0.5f  // real LPBF minimum, not 3x voxel
         };
 
         var errors = new List<string>();
 
-        // Физика (без Library.Log — перехватываем)
+        // Physics (Library.Log suppressed — we capture it)
         try
         {
             ComputeSilent(S);
@@ -81,16 +99,17 @@ public static class DesignSweep
                 false, "PHYSICS FAILED");
         }
 
-        // ── Проверки ──
-        // Термический стресс (warning only — print-time laser
-        // modulation). НЕ блокируем — это ограничение материала, не геометрии.
+        // ── Checks ──
+        // Thermal stress is WARNING-ONLY and never blocks: it is a material
+        // limit rather than a geometry one, and print-time laser modulation
+        // is the lever that addresses it.
         float sigma_th_MPa = EngineEvaluation.ThermalStressMPa(S);
 
-        // Все геометрические / производственные предикаты — общий хелпер
-        // (тот же набор, что использует outer sweep).
+        // All geometry / manufacturing predicates live in the shared helper
+        // (the same set the outer sweep uses).
         errors.AddRange(EngineEvaluation.RunValidityChecks(S, out int spatialConflicts));
 
-        // Грубая оценка массы (цилиндр с каналами, без вокселей)
+        // Rough mass estimate (cylinder with channels, no voxels)
         float massKg = EngineEvaluation.MassEstimateKg(S);
         float tw     = EngineEvaluation.TWRatio(S, massKg);
 
@@ -122,10 +141,10 @@ public static class DesignSweep
         );
     }
 
-    // Физика без Library.Log
+    // Physics without Library.Log
     static void ComputeSilent(AeroSpec S)
     {
-        // Термохимия — O/F-dependent interpolation
+        // Thermochemistry — O/F-dependent interpolation
         float g0 = 9.80665f;
         float R0 = 8314f;
         float Pa_SL = 101325f;

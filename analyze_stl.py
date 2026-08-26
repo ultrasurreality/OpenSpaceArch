@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# OpenSpaceArch — Open Computational Architecture for Aerospace Hardware
+# Copyright (C) 2025-2026 ultrasurreality
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU Affero General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option) any
+# later version. It is distributed WITHOUT ANY WARRANTY; without even the
+# implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See <https://www.gnu.org/licenses/> for the full licence text.
 """
 analyze_stl.py — STL geometry analyzer for aerospike rocket engines.
 Produces a structured text report for automated iteration.

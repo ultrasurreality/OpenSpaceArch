@@ -1,8 +1,27 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// OpenSpaceArch — Open Computational Architecture for Aerospace Hardware
+// Copyright (C) 2025-2026 ultrasurreality
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // SpikeTreeRouter.cs — P2 PROTOTYPE (default OFF, NOT wired into FluidFirst)
 //
 // PURPOSE
-//   The real LEAP 71 aerospike plug interior is a 3-D BRANCHING-TRUSS / tree-growth
-//   coolant volume, not a bundle of longitudinal channels.
+//   A plug-nozzle interior is better served by a 3-D BRANCHING-TRUSS / tree-growth
+//   coolant volume than by a bundle of longitudinal channels: the heat load sits on
+//   the gas-side surface, and a branching manifold reaches it with less pressure drop.
 //   OpenSpaceArch currently models the spike interior as longitudinal helical channels
 //   (ChannelRouter.RouteSpikeChannels). This file is the COMPILING SKELETON of a future
 //   3-D tree router that grows a coolant manifold from a single root at the spike base,
@@ -10,9 +29,8 @@
 //   Murray's law at every bifurcation, and stays strictly inside the spike boundary volume.
 //
 //   It is reachable later behind AeroSpec.useSpikeTree (default false). NOTHING here is
-//   called by the production build yet — see ARCHITECTURE.md for
-//   the topology rationale and the planned fluid-first integration. The working
-//   longitudinal-channel spike remains the default and is untouched.
+//   called by the production build yet. The working longitudinal-channel spike remains
+//   the default and is untouched.
 //
 // FLUID-FIRST DISCIPLINE (when this is eventually wired in)
 //   The tree is a VOID. Generate() returns the coolant skeleton (root → branches → tips);

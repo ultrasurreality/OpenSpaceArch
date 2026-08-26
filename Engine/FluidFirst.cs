@@ -1,3 +1,21 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// OpenSpaceArch — Open Computational Architecture for Aerospace Hardware
+// Copyright (C) 2025-2026 ultrasurreality
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // FluidFirst.cs — Voids-first build via voxel composition (v7)
 //
 // THIS IS THE PRODUCTION BUILD PATH (EngineAssembly.Build → FluidFirst.Build).
@@ -17,9 +35,10 @@
 // EngineBodyImplicit.cs, which is NOT wired into this path (see that file's header).
 // Per-voxel pieces that ARE single SDFs: the channel field and the wall field.
 //
-// Design rationale: the wall and the channels are not independent objects;
-// emerge together from the fluid voids — here, via the channel-void → variable-wall
-// offset chain rather than one fused field.
+// Design rationale: the wall and the channels are not independent objects. Wall
+// thickness is a consequence of where the coolant has to go, so it is derived FROM
+// the channel voids — here via the channel-void → variable-wall offset chain,
+// rather than being specified alongside them.
 
 using System.Diagnostics;
 using System.Numerics;

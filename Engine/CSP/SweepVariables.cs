@@ -1,3 +1,21 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// OpenSpaceArch — Open Computational Architecture for Aerospace Hardware
+// Copyright (C) 2025-2026 ultrasurreality
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // SweepVariables.cs — Phase 2 bounded random sweep search space.
 //
 // Defines which AeroSpec parameters the outer layer varies and their
@@ -5,9 +23,9 @@
 // variables randomized from a seeded Random and the two fixed inputs
 // (thrust = mission spec, voxelSize = manufacturing constraint).
 //
-// See ARCHITECTURE.md — these
-// 6 variables are the Phase 2 subset of the full bounded-variable set
-// formalized in ARCHITECTURE.md.
+// These 6 are the subset of the engine's bounded variables that the outer
+// sweep actually varies; the rest stay pinned. See ARCHITECTURE.md,
+// "SEARCH (CSP layer)".
 
 namespace OpenSpaceArch.Engine.CSP;
 

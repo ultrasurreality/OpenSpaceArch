@@ -1,3 +1,26 @@
+// SPDX-License-Identifier: CC0-1.0 AND AGPL-3.0-or-later
+//
+// Portions of this file are adapted from LEAP 71's publicly published
+// SurfaceTurtleWalk example (Ex_SurfaceTurtleWalkShowCase), released by its
+// author under CC0-1.0. The adaptation, and everything else in this file, is
+// part of OpenSpaceArch and licensed AGPL-3.0-or-later.
+//
+// OpenSpaceArch — Open Computational Architecture for Aerospace Hardware
+// Copyright (C) 2025-2026 ultrasurreality
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // SurfaceTurtle.cs — Turtle walk on SDF surface
 //
 // RETAINED FOR REFERENCE — NOT THE ACTIVE ROUTER.
